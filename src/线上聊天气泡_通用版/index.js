@@ -1,6 +1,7 @@
 // ============================================================
-// 线上聊天气泡_通用版 v14.4
-// 变更：无可用世界书的聊天不再沿用上个角色的外观与表情包配置
+// 线上聊天气泡_通用版 v14.5
+// 变更：注入前检查全局世界书、角色附加世界书与聊天世界书，避免重复注入同名条目
+// v14.4：无可用世界书的聊天不再沿用上个角色的外观与表情包配置
 //       写入链路全程返回布尔 + 写入后读回校验，失败如实上报
 //       独立系统消息补齐主题变量；清理范围收窄至气泡相邻节点
 //       启动等待页面就绪并兜底捕获异常；世界书读取优先现代接口
@@ -792,6 +793,71 @@ stream_mode = defer`;
         return null;
     }
 
+    // 注入去重范围：聊天世界书 > 角色附加世界书 > 全局世界书。
+    // 角色主世界书是本脚本的写入目标，仍由 upsertEntry 自己处理，不放进跨书去重列表。
+    async function resolveInjectionGuardBooks(targetBook) {
+        let globals = [];
+        let additionals = [];
+        let chat = '';
+
+        try {
+            if (typeof getGlobalWorldbookNames === 'function') {
+                const r = await getGlobalWorldbookNames();
+                if (Array.isArray(r)) globals = r;
+            } else if (typeof getLorebookSettings === 'function') {
+                const r = await getLorebookSettings();
+                if (r && Array.isArray(r.selected_global_lorebooks)) globals = r.selected_global_lorebooks;
+            }
+        } catch (e) { /* 无法读取全局世界书时仅跳过去重检查，不阻断原注入流程 */ }
+
+        try {
+            if (typeof getCharWorldbookNames === 'function') {
+                const r = await getCharWorldbookNames('current');
+                if (r && Array.isArray(r.additional)) additionals = r.additional;
+            } else if (typeof getCharLorebooks === 'function') {
+                const r = await getCharLorebooks({ name: 'current', type: 'all' });
+                if (r && Array.isArray(r.additional)) additionals = r.additional;
+            }
+        } catch (e) { /* 无法读取角色附加世界书时仅跳过去重检查 */ }
+
+        try {
+            if (typeof getChatWorldbookName === 'function') {
+                chat = await getChatWorldbookName('current');
+            } else if (typeof getChatLorebook === 'function') {
+                chat = await getChatLorebook();
+            }
+        } catch (e) { /* 当前聊天未绑定世界书或接口不可用 */ }
+
+        const seen = new Set();
+        return [chat].concat(additionals, globals)
+            .map(name => String(name || '').trim())
+            .filter(name => name && name !== targetBook && !seen.has(name) && seen.add(name));
+    }
+
+    // 一次读完所有去重范围内的世界书，记录每个聊天气泡条目最优先的既有来源。
+    async function scanInjectionGuardEntries(targetBook) {
+        const books = await resolveInjectionGuardBooks(targetBook);
+        const titles = new Set(Object.keys(SPEC).map(key => SPEC[key].title));
+        const hits = {};
+        for (const book of books) {
+            const entries = await listEntries(book);
+            if (entries) {
+                entries.forEach(entry => {
+                    const title = entryTitle(entry);
+                    if (titles.has(title) && !hits[title]) hits[title] = { book: book, entry: entry };
+                });
+                continue;
+            }
+            // 旧版环境若无法列出整本世界书，则逐标题使用 STScript 兜底查询。
+            for (const title of titles) {
+                if (hits[title]) continue;
+                const found = await findEntry(book, title);
+                if (found) hits[title] = { book: book, entry: found.entry };
+            }
+        }
+        return hits;
+    }
+
     async function findEntry(book, title) {
         const list = await listEntries(book);
         if (list) {
@@ -1105,8 +1171,9 @@ stream_mode = defer`;
         return typeof back === 'string' && back === content;
     }
 
-    // 返回 'created' | 'updated' | 'kept' | 'failed'
-    async function upsertEntry(book, spec, content, overwrite) {
+    // 返回 'created' | 'updated' | 'kept' | 'external' | 'failed'
+    // externalBook 表示同名条目已存在于已启用的其它世界书：保留原条目，不再向目标书创建副本。
+    async function upsertEntry(book, spec, content, overwrite, externalBook) {
         const found = await findEntry(book, spec.title);
         if (found) {
             spec.uid = found.uid;
@@ -1127,6 +1194,10 @@ stream_mode = defer`;
             // 任何写入路径失败（只读世界书、斜杠命令被拒）都如实上报，杜绝假成功
             if (!ok || !(await verifyWritten(book, spec, content))) return 'failed';
             return 'updated';
+        }
+        if (externalBook) {
+            console.info(`[聊天气泡] 条目「${spec.title}」已存在于「${externalBook}」，跳过向「${book}」重复注入。`);
+            return 'external';
         }
         const created = await helperCreate(book, spec, content);
         if (created) {
@@ -1334,13 +1405,18 @@ stream_mode = defer`;
             // 无书聊天已在 wipeRuntimeConfig 中先行重置，不会沿用其他角色的配置
             resetConfigurables();
             const report = [];
+            const skipped = [];
+            const guardEntries = await scanInjectionGuardEntries(book);
 
             // 1. 外观配置：只创建不覆盖，创建后立即读回应用
             if (CONFIG.INJECT_CONFIG_WI) {
-                const confRes = await upsertEntry(book, SPEC.conf, CONFIG_LIB_DEFAULT, false);
+                const confGuard = guardEntries[SPEC.conf.title];
+                const confRes = await upsertEntry(book, SPEC.conf, CONFIG_LIB_DEFAULT, false, confGuard && confGuard.book);
                 if (confRes === 'created') { report.push('外观配置'); wrote = true; }
                 else if (confRes === 'failed') failed = true;
-                const confText = await readEntryContent(book, SPEC.conf.title);
+                else if (confRes === 'external') skipped.push(SPEC.conf.title);
+                const confBook = confRes === 'external' ? confGuard.book : book;
+                const confText = await readEntryContent(confBook, SPEC.conf.title);
                 if (confText != null) {
                     applyConfigKV(parseKV(confText));
                     const vm = confText.match(/模板版本\s*(v\d+)/);
@@ -1353,19 +1429,24 @@ stream_mode = defer`;
 
             // 2. 表情包链接库：只创建不覆盖
             if (CONFIG.INJECT_STICKER_WI) {
-                const libRes = await upsertEntry(book, SPEC.lib, STICKER_LIB_DEFAULT, false);
+                const libGuard = guardEntries[SPEC.lib.title];
+                const libRes = await upsertEntry(book, SPEC.lib, STICKER_LIB_DEFAULT, false, libGuard && libGuard.book);
                 if (libRes === 'created') { report.push('表情包链接库'); wrote = true; }
                 else if (libRes === 'failed') failed = true;
+                else if (libRes === 'external') skipped.push(SPEC.lib.title);
 
-                const libText = await readEntryContent(book, SPEC.lib.title);
+                const libBook = libRes === 'external' ? libGuard.book : book;
+                const libText = await readEntryContent(libBook, SPEC.lib.title);
                 const fromWi = parseStickerLib(libText != null ? libText : STICKER_LIB_DEFAULT);
                 STK.map = Object.assign({}, fromWi, CONFIG.STICKER_MAP || {});
 
                 // 3. 名录：同步内容，但不改动条目开关（respectEnabled）
                 const names = Object.keys(STK.map);
-                const listRes = await upsertEntry(book, SPEC.list, stickerListText(names), CONFIG.STICKER_SYNC_NAMES || manual);
+                const listGuard = guardEntries[SPEC.list.title];
+                const listRes = await upsertEntry(book, SPEC.list, stickerListText(names), CONFIG.STICKER_SYNC_NAMES || manual, listGuard && listGuard.book);
                 if (listRes === 'created' || listRes === 'updated') wrote = true;
                 else if (listRes === 'failed') failed = true;
+                else if (listRes === 'external') skipped.push(SPEC.list.title);
                 if (listRes === 'created') report.push('表情包名录');
             } else {
                 STK.map = Object.assign({}, CONFIG.STICKER_MAP || {});
@@ -1373,10 +1454,12 @@ stream_mode = defer`;
 
             // 4. 格式条目：随脚本强制启用并更新
             if (CONFIG.AUTO_INJECT_WI || manual) {
-                const fmtRes = await upsertEntry(book, SPEC.format, FORMAT_TEXT, CONFIG.WI_FORCE_UPDATE || manual);
+                const fmtGuard = guardEntries[SPEC.format.title];
+                const fmtRes = await upsertEntry(book, SPEC.format, FORMAT_TEXT, CONFIG.WI_FORCE_UPDATE || manual, fmtGuard && fmtGuard.book);
                 if (fmtRes === 'created') { report.push('聊天格式条目'); wrote = true; }
                 else if (fmtRes === 'updated') wrote = true;
                 else if (fmtRes === 'failed') failed = true;
+                else if (fmtRes === 'external') skipped.push(SPEC.format.title);
             }
 
             STK.loaded = !failed;
@@ -1388,6 +1471,7 @@ stream_mode = defer`;
                 console.warn(`[聊天气泡] 世界书「${book}」存在写入失败的条目（可能只读/权限受限/命令异常）。`);
                 if (manual) toastMsg(`「${book}」有条目写入失败，可能只读或权限受限，详见控制台。`, 'error');
             } else if (report.length) toastMsg(`已在「${book}」注入：${report.join('、')}。`, 'success');
+            else if (manual && skipped.length) toastMsg('检测到聊天气泡条目已存在于其它已启用世界书，本次未重复注入，配置已重新读取。', 'success');
             else if (manual) toastMsg(`「${book}」条目已同步，配置已重新读取。`, 'success');
         } catch (err) {
             console.warn('[聊天气泡] 世界书处理异常：', err);
@@ -2399,7 +2483,8 @@ stream_mode = defer`;
                     if (STK.busy) return;
                     if (!hasActiveChat()) return;
                     const expected = await resolveBookName();
-                    if (!expected || bookName !== expected) return;
+                    const watchedBooks = new Set([expected].concat(await resolveInjectionGuardBooks(expected)).filter(Boolean));
+                    if (!watchedBooks.has(bookName)) return;
                     await bootstrapWorldInfo(false);
                     refreshVisuals();
                 }, 1200);
