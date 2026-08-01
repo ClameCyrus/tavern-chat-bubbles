@@ -15,20 +15,3 @@
 ```js
 import 'https://testingcf.jsdelivr.net/gh/ClameCyrus/tavern-chat-bubbles/dist/线上聊天气泡_通用版/index.js';
 ```
-
-以后只需修改并推送 [`src/线上聊天气泡_通用版/index.js`](src/线上聊天气泡_通用版/index.js)。GitHub Actions 会重新生成 `dist` 并更新版本标签，使用者不需要反复导入新的完整 JSON。
-
-## 文件结构
-
-- `src/线上聊天气泡_通用版/index.js`：可维护的完整脚本源码
-- `dist/线上聊天气泡_通用版/index.js`：Actions 自动生成的 CDN 文件
-- `release/酒馆助手脚本-线上聊天气泡_通用版-自动更新.json`：导入酒馆助手的轻量加载器
-
-## 更新步骤
-
-1. 修改 `src/线上聊天气泡_通用版/index.js`。
-2. 提交并推送到 `main`。
-3. 等待仓库 Actions 中的 `bundle` 工作流完成。
-4. CDN 缓存更新后，酒馆重新加载脚本即可取得新版。
-
-> 国内访问使用 `https://testingcf.jsdelivr.net`，不使用 `https://cdn.jsdelivr.net`。
