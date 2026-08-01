@@ -1,0 +1,17 @@
+{
+  "type": "script",
+  "enabled": true,
+  "name": "线上聊天气泡_通用版（自动更新）",
+  "id": "da6895c0-b9fe-40ff-81f0-a24c79c5ec7a",
+  "content": "import 'https://testingcf.jsdelivr.net/gh/ClameCyrus/tavern-chat-bubbles/dist/线上聊天气泡_通用版/index.js';",
+  "info": "自动更新加载器。当前仓库初始版本：v14.4.2。实际代码从 GitHub + testingcf.jsdelivr.net 加载。\n- 作者: ClameCyrus \n",
+  "button": {
+    "enabled": true,
+    "buttons": []
+  },
+  "data": {},
+  "export_with": {
+    "data": true,
+    "button": false
+  }
+}
