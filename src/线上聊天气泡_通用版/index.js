@@ -1,6 +1,7 @@
 // ============================================================
-// 线上聊天气泡_通用版 v14.6
-// 变更：缺失条目会补入同组聊天气泡条目最集中的世界书，不再固定写入角色主世界书
+// 线上聊天气泡_通用版 v14.7
+// 变更：支持 npc_aliases.标准名 = 别名1, 别名2，统一 NPC 显示名、头像与渐变头像
+// v14.6：缺失条目会补入同组聊天气泡条目最集中的世界书，不再固定写入角色主世界书
 // v14.5：注入前检查全局世界书、角色附加世界书与聊天世界书，避免重复注入同名条目
 // v14.4：无可用世界书的聊天不再沿用上个角色的外观与表情包配置
 //       写入链路全程返回布尔 + 写入后读回校验，失败如实上报
@@ -15,13 +16,14 @@
 const FHB_STYLE_ID = 'fhb-style-chatbubble';
 
 function initChatBubbles() {
-    const CONF_VERSION = 'v13';
+    const CONF_VERSION = 'v14';
 
     const CONFIG = {
         // —— 以下带 * 的项均可被世界书「外观配置」条目覆盖，注释掉即回退到此处默认 ——
         USER_AVATAR: '',        // *
         CHAR_AVATAR: '',        // *
         NPC_AVATARS: {},        // *
+        NPC_ALIASES: {},        // * npc_aliases.<标准名> = 别名1, 别名2
 
         ACCENT_DARK: '',        // *
         ACCENT_LIGHT: '',       // *
@@ -64,7 +66,7 @@ function initChatBubbles() {
 
     // 出厂快照：用于「注释掉配置即回退」
     const CONFIGURABLE_KEYS = [
-        'USER_AVATAR', 'CHAR_AVATAR', 'NPC_AVATARS',
+        'USER_AVATAR', 'CHAR_AVATAR', 'NPC_AVATARS', 'NPC_ALIASES',
         'ACCENT_DARK', 'ACCENT_LIGHT', 'ACCENT2_DARK', 'ACCENT2_LIGHT',
         'CHAR_EXTRA_ALIASES', 'DECO', 'DECO_SIZE', 'DECO_OFFSET', 'BUBBLE',
         'STICKER_SIZE', 'theme', 'imgW', 'imgH', 'collapseMin', 'STREAM_MODE'
@@ -311,9 +313,27 @@ function initChatBubbles() {
         return '';
     }
 
+    function npcCanonicalName(name) {
+        const cleaned = cleanName(name);
+        const needle = lowerName(cleaned);
+        if (!needle) return cleaned;
+
+        const aliases = CONFIG.NPC_ALIASES || {};
+        for (const rawCanonical of Object.keys(aliases)) {
+            const canonical = cleanName(rawCanonical);
+            if (!canonical) continue;
+            if (lowerName(canonical) === needle) return canonical;
+
+            const list = Array.isArray(aliases[rawCanonical]) ? aliases[rawCanonical] : [];
+            if (list.some(alias => lowerName(cleanName(alias)) === needle)) return canonical;
+        }
+        return cleaned;
+    }
+
     function npcAvatarUrl(rawName, dispName) {
         const tbl = CONFIG.NPC_AVATARS || {};
-        const cands = [lowerName(rawName), lowerName(dispName)].filter(Boolean);
+        const canonical = npcCanonicalName(dispName || rawName);
+        const cands = [lowerName(cleanName(rawName)), lowerName(cleanName(dispName)), lowerName(canonical)].filter(Boolean);
         for (const k of Object.keys(tbl)) {
             if (!tbl[k]) continue;
             if (cands.includes(lowerName(k))) return tbl[k];
@@ -363,7 +383,7 @@ function initChatBubbles() {
         const kind = senderKind(name);
         if (kind === 'user') return ctx.userName || 'user';
         if (kind === 'char') return ctx.charName || CONFIG.charNameFallback;
-        return cleanName(name);
+        return npcCanonicalName(name);
     }
 
     // ---------- 头像与角色环 ----------
@@ -403,7 +423,7 @@ function initChatBubbles() {
     function avatarHTML(kind, rawName) {
         const disp = displayName(rawName);
         const src = kind === 'user' ? ctx.userAvatar : kind === 'char' ? ctx.charAvatar : npcAvatarUrl(rawName, disp);
-        const style = kind === 'npc' ? ` style="background:${npcGradient(cleanName(rawName))}"` : '';
+        const style = kind === 'npc' ? ` style="background:${npcGradient(cleanName(disp))}"` : '';
         const img = src ? `<img class="fhb-av" src="${escapeAttr(src)}" alt="" loading="lazy" onerror="this.style.display='none'">` : '';
         const frame = kind === 'char' ? charFrame() : '';
         return `<div class="fhb-avwrap fhb-w-${kind}">${frame}<div class="fhb-avatar fhb-av-${kind}"${style}><span class="fhb-avi">${escapeHTML(initials(disp))}</span>${img}</div></div>`;
@@ -525,8 +545,7 @@ function initChatBubbles() {
 哭哭--https://files.catbox.moe/rw1cfk.png
 讨好--https://files.catbox.moe/7fwfte.png`;
 
-    const CONFIG_LIB_DEFAULT =
-`# ============================================================
+    const CONFIG_LIB_DEFAULT = `# ============================================================
 # 聊天气泡 · 外观配置    模板版本 ${CONF_VERSION}
 # 本条目请保持关闭（灰灯），它不会发给 AI，只供脚本读取。
 # ============================================================
@@ -634,6 +653,11 @@ collapse_min = 3
 # 当 AI 用昵称当发送方（比如写了 Red 而不是角色全名）时，
 # 填在这里可以让脚本仍然把它认成主角，用主角头像。
 char_aliases =
+
+# NPC 别名：点号后写希望统一显示的标准名，等号后写它的其它叫法。
+# 多个别名用逗号隔开；匹配时忽略大小写。别名会共用标准名配置的头像。
+# 示例：以下配置会把 朱利安、Jules 和小朱都显示为「Julian」。
+# npc_aliases.Julian = 朱利安, Jules, 小朱
 
 # 流式生成时的渲染方式：
 #   defer = 生成过程中先显示原始文字，生成结束后一次性变成气泡（不闪，推荐）
@@ -1364,6 +1388,17 @@ stream_mode = defer`;
                 return;
             }
 
+            if (kl.indexOf('npc_aliases.') === 0) {
+                const canonical = cleanName(p.k.slice('npc_aliases.'.length).trim());
+                if (!canonical || !v) return;
+                if (!Array.isArray(CONFIG.NPC_ALIASES[canonical])) CONFIG.NPC_ALIASES[canonical] = [];
+                v.split(/[,，、|]/).map(cleanName).filter(Boolean).forEach(alias => {
+                    if (!CONFIG.NPC_ALIASES[canonical].some(item => lowerName(cleanName(item)) === lowerName(alias))) {
+                        CONFIG.NPC_ALIASES[canonical].push(alias);
+                    }
+                });
+                return;
+            }
             if (kl.indexOf('npc.') === 0) {
                 const name = p.k.slice(4).trim();
                 if (name && v) CONFIG.NPC_AVATARS[name] = v;
