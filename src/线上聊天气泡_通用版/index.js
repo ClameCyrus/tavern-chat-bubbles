@@ -1,6 +1,7 @@
 // ============================================================
-// 线上聊天气泡_通用版 v14.5
-// 变更：注入前检查全局世界书、角色附加世界书与聊天世界书，避免重复注入同名条目
+// 线上聊天气泡_通用版 v14.6
+// 变更：缺失条目会补入同组聊天气泡条目最集中的世界书，不再固定写入角色主世界书
+// v14.5：注入前检查全局世界书、角色附加世界书与聊天世界书，避免重复注入同名条目
 // v14.4：无可用世界书的聊天不再沿用上个角色的外观与表情包配置
 //       写入链路全程返回布尔 + 写入后读回校验，失败如实上报
 //       独立系统消息补齐主题变量；清理范围收窄至气泡相邻节点
@@ -88,6 +89,7 @@ function initChatBubbles() {
         STK.book = '';
         STK.loaded = false;
         STK.confVer = '';
+        STK.sources = {};
     }
 
     let PW = window;
@@ -102,7 +104,7 @@ function initChatBubbles() {
     }
 
     const ctx = { userName: '', charName: '', userAvatar: '', charAvatar: '' };
-    const STK = { map: {}, loaded: false, book: '', busy: false, confVer: '', lastWrite: 0, quiet: 0 };
+    const STK = { map: {}, loaded: false, book: '', busy: false, confVer: '', sources: {}, lastWrite: 0, quiet: 0 };
     const GEN = { active: false, timer: null, poller: null };
 
     // ---------- 基础工具 ----------
@@ -834,28 +836,64 @@ stream_mode = defer`;
             .filter(name => name && name !== targetBook && !seen.has(name) && seen.add(name));
     }
 
-    // 一次读完所有去重范围内的世界书，记录每个聊天气泡条目最优先的既有来源。
+    // 一次读完所有去重范围内的世界书，记录每个条目的最优先来源，
+    // 同时统计每本书已有多少个聊天气泡条目，供缺失项推断归属位置。
     async function scanInjectionGuardEntries(targetBook) {
         const books = await resolveInjectionGuardBooks(targetBook);
         const titles = new Set(Object.keys(SPEC).map(key => SPEC[key].title));
         const hits = {};
+        const counts = {};
         for (const book of books) {
+            const matchedTitles = new Set();
             const entries = await listEntries(book);
             if (entries) {
                 entries.forEach(entry => {
                     const title = entryTitle(entry);
-                    if (titles.has(title) && !hits[title]) hits[title] = { book: book, entry: entry };
+                    if (!titles.has(title)) return;
+                    matchedTitles.add(title);
+                    if (!hits[title]) hits[title] = { book: book, entry: entry };
                 });
+                counts[book] = matchedTitles.size;
                 continue;
             }
             // 旧版环境若无法列出整本世界书，则逐标题使用 STScript 兜底查询。
             for (const title of titles) {
-                if (hits[title]) continue;
                 const found = await findEntry(book, title);
-                if (found) hits[title] = { book: book, entry: found.entry };
+                if (!found) continue;
+                matchedTitles.add(title);
+                if (!hits[title]) hits[title] = { book: book, entry: found.entry };
             }
+            counts[book] = matchedTitles.size;
         }
-        return hits;
+        return { books: books, hits: hits, counts: counts };
+    }
+
+    async function countBubbleEntries(book) {
+        const titles = new Set(Object.keys(SPEC).map(key => SPEC[key].title));
+        const entries = await listEntries(book);
+        if (entries) return new Set(entries.map(entryTitle).filter(title => titles.has(title))).size;
+
+        let count = 0;
+        for (const title of titles) {
+            if (await findEntry(book, title)) count++;
+        }
+        return count;
+    }
+
+    // 缺失条目补到同组条目最多的书；数量相同则保留角色主书，避免在分散状态下随意迁移归属。
+    async function resolveInjectionHomeBook(targetBook, scan) {
+        let homeBook = targetBook;
+        let bestCount = await countBubbleEntries(targetBook);
+        for (const book of scan.books) {
+            const count = Number(scan.counts[book] || 0);
+            if (count <= bestCount) continue;
+            homeBook = book;
+            bestCount = count;
+        }
+        if (homeBook !== targetBook) {
+            console.info(`[聊天气泡] 检测到现有工具条目主要位于「${homeBook}」（${bestCount} 条），缺失条目将补入该书。`);
+        }
+        return homeBook;
     }
 
     async function findEntry(book, title) {
@@ -1213,6 +1251,21 @@ stream_mode = defer`;
         return 'created';
     }
 
+    // 目标角色书中已有该条目时沿用目标书；其它书已有时保持原位；
+    // 两处都没有时，补入推断出的同组条目归属书。
+    async function upsertRoutedEntry(targetBook, homeBook, guardEntries, spec, content, overwrite) {
+        const guard = guardEntries[spec.title];
+        if (guard) {
+            const result = await upsertEntry(targetBook, spec, content, overwrite, guard.book);
+            return { result: result, book: result === 'external' ? guard.book : targetBook };
+        }
+
+        let writeBook = targetBook;
+        if (homeBook !== targetBook && !(await findEntry(targetBook, spec.title))) writeBook = homeBook;
+        const result = await upsertEntry(writeBook, spec, content, overwrite);
+        return { result: result, book: writeBook };
+    }
+
     // ---------- 数据条目解析 ----------
     function parseStickerLib(text) {
         const map = {};
@@ -1406,16 +1459,29 @@ stream_mode = defer`;
             resetConfigurables();
             const report = [];
             const skipped = [];
-            const guardEntries = await scanInjectionGuardEntries(book);
+            const failedBooks = new Set();
+            const verifiedBooks = new Set([book]);
+            STK.sources = {};
+            const guardScan = await scanInjectionGuardEntries(book);
+            const guardEntries = guardScan.hits;
+            const homeBook = await resolveInjectionHomeBook(book, guardScan);
+
+            async function routedUpsert(spec, content, overwrite) {
+                const route = await upsertRoutedEntry(book, homeBook, guardEntries, spec, content, overwrite);
+                STK.sources[spec.title] = route.book;
+                if (route.result !== 'external') verifiedBooks.add(route.book);
+                if (route.result === 'failed') failedBooks.add(route.book);
+                return route;
+            }
 
             // 1. 外观配置：只创建不覆盖，创建后立即读回应用
             if (CONFIG.INJECT_CONFIG_WI) {
-                const confGuard = guardEntries[SPEC.conf.title];
-                const confRes = await upsertEntry(book, SPEC.conf, CONFIG_LIB_DEFAULT, false, confGuard && confGuard.book);
-                if (confRes === 'created') { report.push('外观配置'); wrote = true; }
+                const confRoute = await routedUpsert(SPEC.conf, CONFIG_LIB_DEFAULT, false);
+                const confRes = confRoute.result;
+                if (confRes === 'created') { report.push({ book: confRoute.book, label: '外观配置' }); wrote = true; }
                 else if (confRes === 'failed') failed = true;
                 else if (confRes === 'external') skipped.push(SPEC.conf.title);
-                const confBook = confRes === 'external' ? confGuard.book : book;
+                const confBook = confRoute.book;
                 const confText = await readEntryContent(confBook, SPEC.conf.title);
                 if (confText != null) {
                     applyConfigKV(parseKV(confText));
@@ -1429,34 +1495,34 @@ stream_mode = defer`;
 
             // 2. 表情包链接库：只创建不覆盖
             if (CONFIG.INJECT_STICKER_WI) {
-                const libGuard = guardEntries[SPEC.lib.title];
-                const libRes = await upsertEntry(book, SPEC.lib, STICKER_LIB_DEFAULT, false, libGuard && libGuard.book);
-                if (libRes === 'created') { report.push('表情包链接库'); wrote = true; }
+                const libRoute = await routedUpsert(SPEC.lib, STICKER_LIB_DEFAULT, false);
+                const libRes = libRoute.result;
+                if (libRes === 'created') { report.push({ book: libRoute.book, label: '表情包链接库' }); wrote = true; }
                 else if (libRes === 'failed') failed = true;
                 else if (libRes === 'external') skipped.push(SPEC.lib.title);
 
-                const libBook = libRes === 'external' ? libGuard.book : book;
+                const libBook = libRoute.book;
                 const libText = await readEntryContent(libBook, SPEC.lib.title);
                 const fromWi = parseStickerLib(libText != null ? libText : STICKER_LIB_DEFAULT);
                 STK.map = Object.assign({}, fromWi, CONFIG.STICKER_MAP || {});
 
                 // 3. 名录：同步内容，但不改动条目开关（respectEnabled）
                 const names = Object.keys(STK.map);
-                const listGuard = guardEntries[SPEC.list.title];
-                const listRes = await upsertEntry(book, SPEC.list, stickerListText(names), CONFIG.STICKER_SYNC_NAMES || manual, listGuard && listGuard.book);
+                const listRoute = await routedUpsert(SPEC.list, stickerListText(names), CONFIG.STICKER_SYNC_NAMES || manual);
+                const listRes = listRoute.result;
                 if (listRes === 'created' || listRes === 'updated') wrote = true;
                 else if (listRes === 'failed') failed = true;
                 else if (listRes === 'external') skipped.push(SPEC.list.title);
-                if (listRes === 'created') report.push('表情包名录');
+                if (listRes === 'created') report.push({ book: listRoute.book, label: '表情包名录' });
             } else {
                 STK.map = Object.assign({}, CONFIG.STICKER_MAP || {});
             }
 
             // 4. 格式条目：随脚本强制启用并更新
             if (CONFIG.AUTO_INJECT_WI || manual) {
-                const fmtGuard = guardEntries[SPEC.format.title];
-                const fmtRes = await upsertEntry(book, SPEC.format, FORMAT_TEXT, CONFIG.WI_FORCE_UPDATE || manual, fmtGuard && fmtGuard.book);
-                if (fmtRes === 'created') { report.push('聊天格式条目'); wrote = true; }
+                const fmtRoute = await routedUpsert(SPEC.format, FORMAT_TEXT, CONFIG.WI_FORCE_UPDATE || manual);
+                const fmtRes = fmtRoute.result;
+                if (fmtRes === 'created') { report.push({ book: fmtRoute.book, label: '聊天格式条目' }); wrote = true; }
                 else if (fmtRes === 'updated') wrote = true;
                 else if (fmtRes === 'failed') failed = true;
                 else if (fmtRes === 'external') skipped.push(SPEC.format.title);
@@ -1465,12 +1531,21 @@ stream_mode = defer`;
             STK.loaded = !failed;
 
             // 开关体检：修复历史脏字段；按设计应保持开启的条目强制扶正；名录的手动开关不受干预
-            await verifyEntryToggles(book);
+            for (const verifiedBook of verifiedBooks) await verifyEntryToggles(verifiedBook);
 
             if (failed) {
-                console.warn(`[聊天气泡] 世界书「${book}」存在写入失败的条目（可能只读/权限受限/命令异常）。`);
-                if (manual) toastMsg(`「${book}」有条目写入失败，可能只读或权限受限，详见控制台。`, 'error');
-            } else if (report.length) toastMsg(`已在「${book}」注入：${report.join('、')}。`, 'success');
+                const names = Array.from(failedBooks);
+                console.warn(`[聊天气泡] 世界书「${names.join('、')}」存在写入失败的条目（可能只读/权限受限/命令异常）。`);
+                if (manual) toastMsg(`「${names.join('、')}」有条目写入失败，可能只读或权限受限，详见控制台。`, 'error');
+            } else if (report.length) {
+                const grouped = {};
+                report.forEach(item => {
+                    if (!grouped[item.book]) grouped[item.book] = [];
+                    grouped[item.book].push(item.label);
+                });
+                const summary = Object.keys(grouped).map(name => `「${name}」：${grouped[name].join('、')}`).join('；');
+                toastMsg(`已注入 ${summary}。`, 'success');
+            }
             else if (manual && skipped.length) toastMsg('检测到聊天气泡条目已存在于其它已启用世界书，本次未重复注入，配置已重新读取。', 'success');
             else if (manual) toastMsg(`「${book}」条目已同步，配置已重新读取。`, 'success');
         } catch (err) {
@@ -2591,7 +2666,8 @@ stream_mode = defer`;
                 toastMsg('当前没有打开的角色聊天，无法定位世界书。', 'warning');
                 return;
             }
-            const book = STK.book || await resolveBookName();
+            const primaryBook = STK.book || await resolveBookName();
+            const book = STK.sources[SPEC.conf.title] || primaryBook;
             if (!book || !(await worldbookExists(book))) {
                 toastMsg('未找到可写入的世界书，请先为当前角色绑定一本已存在的世界书。', 'error');
                 return;
