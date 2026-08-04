@@ -7,8 +7,9 @@ import {
 } from './appearance-config';
 
 // ============================================================
-// 线上聊天气泡_通用版 v15.1
-// 变更：外观面板跟随酒馆主题并支持隐藏滚动条的内部滚动；新增头像悬停放大与气泡圆角配置
+// 线上聊天气泡_通用版 v15.2
+// 变更：用户名替换在气泡渲染后自动补应用；消息编辑完成后可靠重渲染；用户气泡内文字左对齐
+// v15.1：外观面板跟随酒馆主题并支持隐藏滚动条的内部滚动；新增头像悬停放大与气泡圆角配置
 // v14.6：缺失条目会补入同组聊天气泡条目最集中的世界书，不再固定写入角色主世界书
 // v14.5：注入前检查全局世界书、角色附加世界书与聊天世界书，避免重复注入同名条目
 // v14.4：无可用世界书的聊天不再沿用上个角色的外观与表情包配置
@@ -22,9 +23,10 @@ import {
 //       开关安全写入与脏字段自愈沿用 v14.2
 // ============================================================
 const FHB_STYLE_ID = 'fhb-style-chatbubble';
+const FHB_MESSAGE_RENDERED_EVENT = 'fhb_message_rendered';
 
 function initChatBubbles() {
-    const CONF_VERSION = 'v15.1';
+    const CONF_VERSION = 'v15.2';
 
     const CONFIG = {
         // —— 以下带 * 的项均可被世界书「外观配置」条目覆盖，注释掉即回退到此处默认 ——
@@ -2091,6 +2093,7 @@ stream_mode = defer`;
 
         const noAnim = textEl.dataset.fhbNoanim === '1';
 
+        let rendered = false;
         ENTRY_RE.lastIndex = 0;
         const html = sanitizeForParse(textEl.innerHTML);
         if (ENTRY_RE.test(html)) {
@@ -2121,11 +2124,19 @@ stream_mode = defer`;
                 textEl.innerHTML = out;
                 cleanSiblings(textEl);
                 groupThreads(textEl);
+                rendered = true;
             }
         } else {
             groupThreads(textEl);
         }
         bindDelegation(textEl);
+        if (rendered && typeof eventEmit === 'function') {
+            const mes = textEl.closest ? textEl.closest('.mes') : null;
+            const messageId = Number(mes && mes.getAttribute('mesid'));
+            if (Number.isInteger(messageId) && messageId >= 0) {
+                void eventEmit(FHB_MESSAGE_RENDERED_EVENT, messageId);
+            }
+        }
     }
 
     function denyClaim(rp, reason) {
@@ -2338,7 +2349,7 @@ stream_mode = defer`;
 .fhb-ring-dot{fill:var(--fhb-accent);opacity:.9;}
 .fhb-col{position:relative;display:flex;flex-direction:column;align-items:flex-start;gap:4px;max-width:min(72%,480px);min-width:0;}
 .fhb-col-wide{max-width:min(86%,440px);}
-.fhb-user .fhb-col{align-items:flex-end;text-align:right;}
+.fhb-user .fhb-col{align-items:flex-end;text-align:left;}
 .fhb-bubble-wrap{position:relative;display:block;width:fit-content;max-width:100%;transition:transform .28s cubic-bezier(.22,.61,.36,1);}
 .fhb-meta{display:flex;align-items:baseline;gap:6px;font-size:10.5px;letter-spacing:.13em;text-transform:uppercase;color:var(--fhb-meta);font-variant-numeric:tabular-nums;flex-wrap:wrap;}
 .fhb-user .fhb-meta{justify-content:flex-end;}
@@ -2552,6 +2563,38 @@ stream_mode = defer`;
     setTimeout(() => { resolveContext(); processAll(); refreshAllAvatars(); restickerAll(); applyDecos(); }, 1600);
 
     // ---------- 事件绑定 ----------
+    const editRenderTimers = new Map();
+
+    function scheduleRenderAfterEditing(id, delay) {
+        const messageId = Number(id);
+        if (!Number.isInteger(messageId) || messageId < 0) return;
+
+        const previous = editRenderTimers.get(messageId);
+        if (previous) clearTimeout(previous);
+        const startedAt = Date.now();
+
+        const renderWhenReady = () => {
+            editRenderTimers.delete(messageId);
+            const textEl = PD.querySelector(`#chat .mes[mesid="${messageId}"] .mes_text`);
+            if (!textEl) return;
+
+            // 酒馆会先发出编辑事件、稍后才移除 textarea；短暂等待编辑态真正结束，避免丢掉本次重渲染。
+            if (anyEditing() || isEditing(textEl)) {
+                if (Date.now() - startedAt < 5000) {
+                    editRenderTimers.set(messageId, setTimeout(renderWhenReady, 100));
+                }
+                return;
+            }
+
+            resolveContext();
+            transformElement(textEl, { force: true });
+            restickerAll();
+            applyDecos();
+        };
+
+        editRenderTimers.set(messageId, setTimeout(renderWhenReady, delay == null ? 80 : delay));
+    }
+
     if (typeof eventOn === 'function' && typeof tavern_events !== 'undefined') {
 
         // 生成开始：进入流式守卫
@@ -2613,7 +2656,10 @@ stream_mode = defer`;
             });
         }
         if (tavern_events.MESSAGE_UPDATED) {
-            eventOn(tavern_events.MESSAGE_UPDATED, (id) => setTimeout(() => { processById(id); restickerAll(); }, 120));
+            eventOn(tavern_events.MESSAGE_UPDATED, (id) => scheduleRenderAfterEditing(id, 120));
+        }
+        if (tavern_events.MESSAGE_EDITED) {
+            eventOn(tavern_events.MESSAGE_EDITED, (id) => scheduleRenderAfterEditing(id, 0));
         }
         if (tavern_events.MESSAGE_SWIPED) {
             eventOn(tavern_events.MESSAGE_SWIPED, (id) => setTimeout(() => { resolveContext(); processById(id); restickerAll(); }, 80));
@@ -2709,6 +2755,8 @@ stream_mode = defer`;
                     ob.disconnect();
                     if (PW.__FHB_OB === ob) PW.__FHB_OB = null;
                 } catch (e3) {}
+                editRenderTimers.forEach(timerId => clearTimeout(timerId));
+                editRenderTimers.clear();
                 if (GEN.poller) { clearInterval(GEN.poller); GEN.poller = null; }
                 if (GEN.timer) { clearTimeout(GEN.timer); GEN.timer = null; }
             });

@@ -124,7 +124,7 @@ type ChatMessagePatch = {
   data?: Record<string, any>;
 };
 
-const LOG_PREFIX = '[用户名替换脚本V1.98]';
+const LOG_PREFIX = '[用户名替换脚本V1.98.2]';
 const DEFAULT_CUSTOM_PROFILE_ID = 'profile-1';
 const DEFAULT_CUSTOM_THEME_PROFILE_ID = 'theme-1';
 const USER_RULE_SOURCE = '{{user}}';
@@ -134,6 +134,7 @@ const LEGACY_PERSISTENT_BACKUP_DATA_KEY_PREFIX = 'th_user_name_replace_backup_';
 const REPLACEMENT_CLASS = 'TH-user-name-replace';
 const REPLACEMENT_FLOW_CLASS = 'TH-user-name-replace-flow';
 const ORIGINAL_TEXT_DATA_ATTRIBUTE = 'data-th-user-name-original';
+const FHB_MESSAGE_RENDERED_EVENT = 'fhb_message_rendered';
 const ST_CHATU8_MANAGED_SELECTOR = [
   '.image-tag-button',
   '.st-chatu8-image-button',
@@ -3606,26 +3607,36 @@ function init() {
 
   // 纯显示层替换：仅改 DOM，不改聊天数据
   stopList.push(
-    eventOn(tavern_events.USER_MESSAGE_RENDERED, (message_id: number) => {
+    eventMakeLast(tavern_events.USER_MESSAGE_RENDERED, (message_id: number) => {
       scheduleApplyToMessage(message_id);
     }).stop,
   );
 
   stopList.push(
-    eventOn(tavern_events.CHARACTER_MESSAGE_RENDERED, (message_id: number) => {
+    eventMakeLast(tavern_events.CHARACTER_MESSAGE_RENDERED, (message_id: number) => {
       scheduleApplyToMessage(message_id);
     }).stop,
   );
 
   stopList.push(
-    eventOn(tavern_events.MESSAGE_UPDATED, (message_id: number) => {
+    eventMakeLast(tavern_events.MESSAGE_UPDATED, (message_id: number) => {
       scheduleApplyToMessage(message_id);
     }).stop,
   );
 
   stopList.push(
-    eventOn(tavern_events.MESSAGE_SWIPED, (message_id: number) => {
+    eventMakeLast(tavern_events.MESSAGE_SWIPED, (message_id: number) => {
       scheduleApplyToMessage(message_id);
+    }).stop,
+  );
+
+  // 气泡脚本会重建正文 DOM；它完成后再补一次纯显示层替换，避免生成新正文时名称被覆盖回原样。
+  stopList.push(
+    eventMakeLast(FHB_MESSAGE_RENDERED_EVENT, (message_id: number) => {
+      if (destroyed || !isValidMessageId(message_id)) return;
+      setTimeout(() => {
+        if (!destroyed) applyToMessageId(message_id, getSettings());
+      }, 0);
     }).stop,
   );
 

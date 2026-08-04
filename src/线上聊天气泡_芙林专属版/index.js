@@ -1,11 +1,13 @@
 // ============================================================
-// 芙林_聊天气泡_专属版 v11
-// 变更：角标跟随气泡、短句自适应收缩、头像悬浮放大与透明头像回退修复
+// 芙林_聊天气泡_专属版 v12
+// 变更：用户名替换在气泡渲染后自动补应用；消息编辑完成后可靠重渲染；用户气泡内文字左对齐
+// v11：角标跟随气泡、短句自适应收缩、头像悬浮放大与透明头像回退修复
 // 功能基线：通用版 v14.7 的单书相关部分（不含跨世界书去重与缺失条目分书写入）
 // 皮肤：芙林专属玫瑰藤蔓框、丝绒金线气泡、玫瑰水印、火漆水印、名字玫瑰标记、红金调色
 // 注入：单卡单书直写，无群聊闸门、无文件探测、不创建聊天书、不跨卡
 // ============================================================
 const FHB_STYLE_ID = 'fhb-style-flynn';
+const FHB_MESSAGE_RENDERED_EVENT = 'fhb_message_rendered';
 
 function initFlynnChatBubbles() {
   const CONF_VERSION = 'v15';
@@ -2022,6 +2024,7 @@ stream_mode = defer`;
 
     const noAnim = textEl.dataset.fhbNoanim === '1';
 
+    let rendered = false;
     ENTRY_RE.lastIndex = 0;
     const html = sanitizeForParse(textEl.innerHTML);
     if (ENTRY_RE.test(html)) {
@@ -2052,11 +2055,19 @@ stream_mode = defer`;
         textEl.innerHTML = out;
         cleanSiblings(textEl);
         groupThreads(textEl);
+        rendered = true;
       }
     } else {
       groupThreads(textEl);
     }
     bindDelegation(textEl);
+    if (rendered && typeof eventEmit === 'function') {
+      const mes = textEl.closest ? textEl.closest('.mes') : null;
+      const messageId = Number(mes && mes.getAttribute('mesid'));
+      if (Number.isInteger(messageId) && messageId >= 0) {
+        void eventEmit(FHB_MESSAGE_RENDERED_EVENT, messageId);
+      }
+    }
   }
 
   function denyClaim(rp, reason) {
@@ -2277,7 +2288,7 @@ stream_mode = defer`;
 .fhb-rose{transform-box:fill-box;transform-origin:center;}
 .fhb-col{position:relative;display:flex;flex-direction:column;align-items:flex-start;gap:4px;max-width:min(72%,480px);min-width:0;}
 .fhb-col-wide{max-width:min(86%,440px);}
-.fhb-user .fhb-col{align-items:flex-end;text-align:right;}
+.fhb-user .fhb-col{align-items:flex-end;text-align:left;}
 .fhb-bubble-wrap{position:relative;display:block;width:fit-content;max-width:100%;transition:transform .28s cubic-bezier(.22,.61,.36,1);}
 .fhb-meta{display:flex;align-items:baseline;gap:6px;font-size:10.5px;letter-spacing:.13em;text-transform:uppercase;color:var(--fhb-meta);font-variant-numeric:tabular-nums;flex-wrap:wrap;}
 .fhb-user .fhb-meta{justify-content:flex-end;}
@@ -2546,6 +2557,38 @@ stream_mode = defer`;
   }, 1600);
 
   // ---------- 事件绑定 ----------
+  const editRenderTimers = new Map();
+
+  function scheduleRenderAfterEditing(id, delay) {
+    const messageId = Number(id);
+    if (!Number.isInteger(messageId) || messageId < 0) return;
+
+    const previous = editRenderTimers.get(messageId);
+    if (previous) clearTimeout(previous);
+    const startedAt = Date.now();
+
+    const renderWhenReady = () => {
+      editRenderTimers.delete(messageId);
+      const textEl = PD.querySelector(`#chat .mes[mesid="${messageId}"] .mes_text`);
+      if (!textEl) return;
+
+      // 酒馆会先发出编辑事件、稍后才移除 textarea；短暂等待编辑态真正结束，避免丢掉本次重渲染。
+      if (anyEditing() || isEditing(textEl)) {
+        if (Date.now() - startedAt < 5000) {
+          editRenderTimers.set(messageId, setTimeout(renderWhenReady, 100));
+        }
+        return;
+      }
+
+      resolveContext();
+      transformElement(textEl, { force: true });
+      restickerAll();
+      applyDecos();
+    };
+
+    editRenderTimers.set(messageId, setTimeout(renderWhenReady, delay == null ? 80 : delay));
+  }
+
   if (typeof eventOn === 'function' && typeof tavern_events !== 'undefined') {
     if (tavern_events.GENERATION_STARTED) {
       eventOn(tavern_events.GENERATION_STARTED, () => {
@@ -2621,12 +2664,10 @@ stream_mode = defer`;
       });
     }
     if (tavern_events.MESSAGE_UPDATED) {
-      eventOn(tavern_events.MESSAGE_UPDATED, id =>
-        setTimeout(() => {
-          processById(id);
-          restickerAll();
-        }, 120),
-      );
+      eventOn(tavern_events.MESSAGE_UPDATED, id => scheduleRenderAfterEditing(id, 120));
+    }
+    if (tavern_events.MESSAGE_EDITED) {
+      eventOn(tavern_events.MESSAGE_EDITED, id => scheduleRenderAfterEditing(id, 0));
     }
     if (tavern_events.MESSAGE_SWIPED) {
       eventOn(tavern_events.MESSAGE_SWIPED, id =>
@@ -2744,6 +2785,8 @@ stream_mode = defer`;
           ob.disconnect();
           if (PW.__FHB_OB_FLYNN === ob) PW.__FHB_OB_FLYNN = null;
         } catch (e3) {}
+        editRenderTimers.forEach(timerId => clearTimeout(timerId));
+        editRenderTimers.clear();
         if (GEN.poller) {
           clearInterval(GEN.poller);
           GEN.poller = null;
