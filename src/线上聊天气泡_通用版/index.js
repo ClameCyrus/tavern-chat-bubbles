@@ -1,6 +1,17 @@
+import { createApp } from 'vue';
+import { createScriptIdIframe, teleportStyle } from '@util/script';
+import AppearancePanel from './AppearancePanel.vue';
+import {
+    parseAppearanceConfigText,
+    serializeAppearanceConfigText
+} from './appearance-config';
+
 // ============================================================
-// 线上聊天气泡_通用版 v14.5
-// 变更：注入前检查全局世界书、角色附加世界书与聊天世界书，避免重复注入同名条目
+// 线上聊天气泡_通用版 v15.2
+// 变更：用户名替换在气泡渲染后自动补应用；消息编辑完成后可靠重渲染；用户气泡内文字左对齐
+// v15.1：外观面板跟随酒馆主题并支持隐藏滚动条的内部滚动；新增头像悬停放大与气泡圆角配置
+// v14.6：缺失条目会补入同组聊天气泡条目最集中的世界书，不再固定写入角色主世界书
+// v14.5：注入前检查全局世界书、角色附加世界书与聊天世界书，避免重复注入同名条目
 // v14.4：无可用世界书的聊天不再沿用上个角色的外观与表情包配置
 //       写入链路全程返回布尔 + 写入后读回校验，失败如实上报
 //       独立系统消息补齐主题变量；清理范围收窄至气泡相邻节点
@@ -12,15 +23,17 @@
 //       开关安全写入与脏字段自愈沿用 v14.2
 // ============================================================
 const FHB_STYLE_ID = 'fhb-style-chatbubble';
+const FHB_MESSAGE_RENDERED_EVENT = 'fhb_message_rendered';
 
 function initChatBubbles() {
-    const CONF_VERSION = 'v13';
+    const CONF_VERSION = 'v15.2';
 
     const CONFIG = {
         // —— 以下带 * 的项均可被世界书「外观配置」条目覆盖，注释掉即回退到此处默认 ——
         USER_AVATAR: '',        // *
         CHAR_AVATAR: '',        // *
         NPC_AVATARS: {},        // *
+        NPC_ALIASES: {},        // * npc_aliases.<标准名> = 别名1, 别名2
 
         ACCENT_DARK: '',        // *
         ACCENT_LIGHT: '',       // *
@@ -31,8 +44,8 @@ function initChatBubbles() {
 
         DECO: {},               // * deco.<user|char|npc|all>.<tl|tr|bl|br>
         DECO_SIZE: '',          // * 装饰宽度
-        DECO_OFFSET: '',        // * 装饰外移比例 0~100
-        BUBBLE: {},             // * bubble.<user|char|npc>.<bg|tx|bd|bs|bw>
+        DECO_OFFSET: '',        // * 装饰外移比例 -100~100
+        BUBBLE: {},             // * bubble.<user|char|npc>.<bg|tx|bd|bs|bw|ra>
 
         STICKER_SIZE: '',       // *
         theme: 'auto',          // *
@@ -63,7 +76,7 @@ function initChatBubbles() {
 
     // 出厂快照：用于「注释掉配置即回退」
     const CONFIGURABLE_KEYS = [
-        'USER_AVATAR', 'CHAR_AVATAR', 'NPC_AVATARS',
+        'USER_AVATAR', 'CHAR_AVATAR', 'NPC_AVATARS', 'NPC_ALIASES',
         'ACCENT_DARK', 'ACCENT_LIGHT', 'ACCENT2_DARK', 'ACCENT2_LIGHT',
         'CHAR_EXTRA_ALIASES', 'DECO', 'DECO_SIZE', 'DECO_OFFSET', 'BUBBLE',
         'STICKER_SIZE', 'theme', 'imgW', 'imgH', 'collapseMin', 'STREAM_MODE'
@@ -88,6 +101,7 @@ function initChatBubbles() {
         STK.book = '';
         STK.loaded = false;
         STK.confVer = '';
+        STK.sources = {};
     }
 
     let PW = window;
@@ -102,7 +116,7 @@ function initChatBubbles() {
     }
 
     const ctx = { userName: '', charName: '', userAvatar: '', charAvatar: '' };
-    const STK = { map: {}, loaded: false, book: '', busy: false, confVer: '', lastWrite: 0, quiet: 0 };
+    const STK = { map: {}, loaded: false, book: '', busy: false, confVer: '', sources: {}, lastWrite: 0, quiet: 0 };
     const GEN = { active: false, timer: null, poller: null };
 
     // ---------- 基础工具 ----------
@@ -309,9 +323,27 @@ function initChatBubbles() {
         return '';
     }
 
+    function npcCanonicalName(name) {
+        const cleaned = cleanName(name);
+        const needle = lowerName(cleaned);
+        if (!needle) return cleaned;
+
+        const aliases = CONFIG.NPC_ALIASES || {};
+        for (const rawCanonical of Object.keys(aliases)) {
+            const canonical = cleanName(rawCanonical);
+            if (!canonical) continue;
+            if (lowerName(canonical) === needle) return canonical;
+
+            const list = Array.isArray(aliases[rawCanonical]) ? aliases[rawCanonical] : [];
+            if (list.some(alias => lowerName(cleanName(alias)) === needle)) return canonical;
+        }
+        return cleaned;
+    }
+
     function npcAvatarUrl(rawName, dispName) {
         const tbl = CONFIG.NPC_AVATARS || {};
-        const cands = [lowerName(rawName), lowerName(dispName)].filter(Boolean);
+        const canonical = npcCanonicalName(dispName || rawName);
+        const cands = [lowerName(cleanName(rawName)), lowerName(cleanName(dispName)), lowerName(canonical)].filter(Boolean);
         for (const k of Object.keys(tbl)) {
             if (!tbl[k]) continue;
             if (cands.includes(lowerName(k))) return tbl[k];
@@ -361,7 +393,7 @@ function initChatBubbles() {
         const kind = senderKind(name);
         if (kind === 'user') return ctx.userName || 'user';
         if (kind === 'char') return ctx.charName || CONFIG.charNameFallback;
-        return cleanName(name);
+        return npcCanonicalName(name);
     }
 
     // ---------- 头像与角色环 ----------
@@ -401,10 +433,11 @@ function initChatBubbles() {
     function avatarHTML(kind, rawName) {
         const disp = displayName(rawName);
         const src = kind === 'user' ? ctx.userAvatar : kind === 'char' ? ctx.charAvatar : npcAvatarUrl(rawName, disp);
-        const style = kind === 'npc' ? ` style="background:${npcGradient(cleanName(rawName))}"` : '';
-        const img = src ? `<img class="fhb-av" src="${escapeAttr(src)}" alt="" loading="lazy" onerror="this.style.display='none'">` : '';
+        const style = kind === 'npc' ? ` style="background:${npcGradient(cleanName(disp))}"` : '';
+        const fallbackStyle = src ? ' style="display:none"' : '';
+        const img = src ? `<img class="fhb-av" src="${escapeAttr(src)}" alt="" loading="lazy" onerror="this.style.display='none';var p=this.previousElementSibling;if(p)p.style.display='flex'">` : '';
         const frame = kind === 'char' ? charFrame() : '';
-        return `<div class="fhb-avwrap fhb-w-${kind}">${frame}<div class="fhb-avatar fhb-av-${kind}"${style}><span class="fhb-avi">${escapeHTML(initials(disp))}</span>${img}</div></div>`;
+        return `<div class="fhb-avwrap fhb-w-${kind}">${frame}<div class="fhb-avatar fhb-av-${kind}"${style}><span class="fhb-avi"${fallbackStyle}>${escapeHTML(initials(disp))}</span>${img}</div></div>`;
     }
 
     // ---------- 四角装饰 ----------
@@ -426,9 +459,20 @@ function initChatBubbles() {
         PD.querySelectorAll('.fhb-msg[data-kind]').forEach(m => {
             const col = m.querySelector('.fhb-col');
             if (!col) return;
+            let wrap = col.querySelector(':scope > .fhb-bubble-wrap');
+            if (!wrap) {
+                const visual = Array.from(col.children).find(n =>
+                    n.classList && (n.classList.contains('fhb-bubble') || n.classList.contains('fhb-fig'))
+                );
+                if (!visual) return;
+                wrap = PD.createElement('div');
+                wrap.className = 'fhb-bubble-wrap';
+                visual.replaceWith(wrap);
+                wrap.appendChild(visual);
+            }
             col.querySelectorAll('.fhb-deco').forEach(n => n.remove());
             const html = decoHTML(m.dataset.kind);
-            if (html) col.insertAdjacentHTML('beforeend', html);
+            if (html) wrap.insertAdjacentHTML('beforeend', html);
         });
     }
 
@@ -523,8 +567,7 @@ function initChatBubbles() {
 哭哭--https://files.catbox.moe/rw1cfk.png
 讨好--https://files.catbox.moe/7fwfte.png`;
 
-    const CONFIG_LIB_DEFAULT =
-`# ============================================================
+    const CONFIG_LIB_DEFAULT = `# ============================================================
 # 聊天气泡 · 外观配置    模板版本 ${CONF_VERSION}
 # 本条目请保持关闭（灰灯），它不会发给 AI，只供脚本读取。
 # ============================================================
@@ -535,6 +578,7 @@ function initChatBubbles() {
 # 3. 想恢复默认，把这一行重新加上 # 注释掉，或者把等号后面清空。
 # 4. 改完之后回到聊天界面，点脚本按钮「注入/更新世界书」，立刻生效。
 # 5. 值不用加引号。填链接就填图片直链（结尾是 .png/.jpg/.gif 那种）。
+# 也可以直接点击脚本按钮「外观配置面板」可视化编辑、预览、导入和导出。
 #
 # ------------------------------------------------------------
 # 一、头像
@@ -577,6 +621,7 @@ accent2_light = #97722c
 #                  double 双线 / groove 凹槽 / ridge 凸边 / none 无边 /
 #                  slash 45度斜纹（注意：斜纹会让气泡圆角失效）
 #     border_width 边框粗细，如 1px、1.5px、2px
+#     border_radius 气泡圆角，如 14px；填 0 为直角
 # 每一项都是独立的，只想改边框就只写边框那行。
 # 示例（删掉 # 才生效）：
 
@@ -584,10 +629,13 @@ accent2_light = #97722c
 # bubble.user.border = #c9a45c
 # bubble.user.border_style = dashed
 # bubble.user.border_width = 1.5px
+# bubble.user.border_radius = 14px
 # bubble.char.background = #1f2a31
 # bubble.char.text = #eef4f8
 # bubble.char.border_style = double
+# bubble.char.border_radius = 0
 # bubble.npc.border_style = dotted
+# bubble.npc.border_radius = 8px
 
 # ------------------------------------------------------------
 # 四、气泡四角装饰图
@@ -608,8 +656,8 @@ accent2_light = #97722c
 # 装饰图宽度。留空用默认（跟随屏幕，约 28~40px）。填法：40px
 # deco_size =
 
-# 装饰图往气泡外面挪多少，填 0 到 100 的数字，默认 40。
-# 0 = 完全贴在气泡内侧的角上；40 = 一半骑在角上；70 以上会明显飘在外面。
+# 装饰图往气泡外面挪多少，填 -100 到 100 的数字，默认 40。
+# 负数 = 往气泡内侧收；0 = 对齐气泡角；40 = 一半骑在角上；70 以上会明显飘在外面。
 # 数字是按装饰图自己的尺寸算的，所以改大小时位置不会跑偏。
 # deco_offset = 40
 
@@ -632,6 +680,11 @@ collapse_min = 3
 # 当 AI 用昵称当发送方（比如写了 Red 而不是角色全名）时，
 # 填在这里可以让脚本仍然把它认成主角，用主角头像。
 char_aliases =
+
+# NPC 别名：点号后写希望统一显示的标准名，等号后写它的其它叫法。
+# 多个别名用逗号隔开；匹配时忽略大小写。别名会共用标准名配置的头像。
+# 示例：以下配置会把 朱利安、Jules 和小朱都显示为「Julian」。
+# npc_aliases.Julian = 朱利安, Jules, 小朱
 
 # 流式生成时的渲染方式：
 #   defer = 生成过程中先显示原始文字，生成结束后一次性变成气泡（不闪，推荐）
@@ -834,28 +887,64 @@ stream_mode = defer`;
             .filter(name => name && name !== targetBook && !seen.has(name) && seen.add(name));
     }
 
-    // 一次读完所有去重范围内的世界书，记录每个聊天气泡条目最优先的既有来源。
+    // 一次读完所有去重范围内的世界书，记录每个条目的最优先来源，
+    // 同时统计每本书已有多少个聊天气泡条目，供缺失项推断归属位置。
     async function scanInjectionGuardEntries(targetBook) {
         const books = await resolveInjectionGuardBooks(targetBook);
         const titles = new Set(Object.keys(SPEC).map(key => SPEC[key].title));
         const hits = {};
+        const counts = {};
         for (const book of books) {
+            const matchedTitles = new Set();
             const entries = await listEntries(book);
             if (entries) {
                 entries.forEach(entry => {
                     const title = entryTitle(entry);
-                    if (titles.has(title) && !hits[title]) hits[title] = { book: book, entry: entry };
+                    if (!titles.has(title)) return;
+                    matchedTitles.add(title);
+                    if (!hits[title]) hits[title] = { book: book, entry: entry };
                 });
+                counts[book] = matchedTitles.size;
                 continue;
             }
             // 旧版环境若无法列出整本世界书，则逐标题使用 STScript 兜底查询。
             for (const title of titles) {
-                if (hits[title]) continue;
                 const found = await findEntry(book, title);
-                if (found) hits[title] = { book: book, entry: found.entry };
+                if (!found) continue;
+                matchedTitles.add(title);
+                if (!hits[title]) hits[title] = { book: book, entry: found.entry };
             }
+            counts[book] = matchedTitles.size;
         }
-        return hits;
+        return { books: books, hits: hits, counts: counts };
+    }
+
+    async function countBubbleEntries(book) {
+        const titles = new Set(Object.keys(SPEC).map(key => SPEC[key].title));
+        const entries = await listEntries(book);
+        if (entries) return new Set(entries.map(entryTitle).filter(title => titles.has(title))).size;
+
+        let count = 0;
+        for (const title of titles) {
+            if (await findEntry(book, title)) count++;
+        }
+        return count;
+    }
+
+    // 缺失条目补到同组条目最多的书；数量相同则保留角色主书，避免在分散状态下随意迁移归属。
+    async function resolveInjectionHomeBook(targetBook, scan) {
+        let homeBook = targetBook;
+        let bestCount = await countBubbleEntries(targetBook);
+        for (const book of scan.books) {
+            const count = Number(scan.counts[book] || 0);
+            if (count <= bestCount) continue;
+            homeBook = book;
+            bestCount = count;
+        }
+        if (homeBook !== targetBook) {
+            console.info(`[聊天气泡] 检测到现有工具条目主要位于「${homeBook}」（${bestCount} 条），缺失条目将补入该书。`);
+        }
+        return homeBook;
     }
 
     async function findEntry(book, title) {
@@ -1213,6 +1302,21 @@ stream_mode = defer`;
         return 'created';
     }
 
+    // 目标角色书中已有该条目时沿用目标书；其它书已有时保持原位；
+    // 两处都没有时，补入推断出的同组条目归属书。
+    async function upsertRoutedEntry(targetBook, homeBook, guardEntries, spec, content, overwrite) {
+        const guard = guardEntries[spec.title];
+        if (guard) {
+            const result = await upsertEntry(targetBook, spec, content, overwrite, guard.book);
+            return { result: result, book: result === 'external' ? guard.book : targetBook };
+        }
+
+        let writeBook = targetBook;
+        if (homeBook !== targetBook && !(await findEntry(targetBook, spec.title))) writeBook = homeBook;
+        const result = await upsertEntry(writeBook, spec, content, overwrite);
+        return { result: result, book: writeBook };
+    }
+
     // ---------- 数据条目解析 ----------
     function parseStickerLib(text) {
         const map = {};
@@ -1255,13 +1359,24 @@ stream_mode = defer`;
         text: 'tx', color: 'tx', tx: 'tx',
         border: 'bd', border_color: 'bd', bd: 'bd',
         border_style: 'bs', style: 'bs', bs: 'bs',
-        border_width: 'bw', width: 'bw', bw: 'bw'
+        border_width: 'bw', width: 'bw', bw: 'bw',
+        border_radius: 'ra', radius: 'ra', br: 'ra'
     };
 
     function normWidth(v) {
         v = String(v || '').trim();
         if (/^\d+(\.\d+)?$/.test(v)) return v + 'px';
         if (/^\d+(\.\d+)?(px|em|rem)$/.test(v)) return v;
+        return '';
+    }
+
+    function normRadius(v) {
+        v = String(v || '').trim();
+        if (v === '0') return '0';
+        if (/^\d+(\.\d+)?$/.test(v)) return v + 'px';
+        try {
+            if (PW.CSS && PW.CSS.supports && PW.CSS.supports('border-radius', v)) return v;
+        } catch (e) { return ''; }
         return '';
     }
 
@@ -1306,11 +1421,27 @@ stream_mode = defer`;
                         if (w) CONFIG.BUBBLE[seg[0]][key] = w;
                         return;
                     }
+                    if (key === 'ra') {
+                        const radius = normRadius(v);
+                        if (radius) CONFIG.BUBBLE[seg[0]][key] = radius;
+                        return;
+                    }
                     CONFIG.BUBBLE[seg[0]][key] = v;
                 }
                 return;
             }
 
+            if (kl.indexOf('npc_aliases.') === 0) {
+                const canonical = cleanName(p.k.slice('npc_aliases.'.length).trim());
+                if (!canonical || !v) return;
+                if (!Array.isArray(CONFIG.NPC_ALIASES[canonical])) CONFIG.NPC_ALIASES[canonical] = [];
+                v.split(/[,，、|]/).map(cleanName).filter(Boolean).forEach(alias => {
+                    if (!CONFIG.NPC_ALIASES[canonical].some(item => lowerName(cleanName(item)) === lowerName(alias))) {
+                        CONFIG.NPC_ALIASES[canonical].push(alias);
+                    }
+                });
+                return;
+            }
             if (kl.indexOf('npc.') === 0) {
                 const name = p.k.slice(4).trim();
                 if (name && v) CONFIG.NPC_AVATARS[name] = v;
@@ -1322,7 +1453,7 @@ stream_mode = defer`;
 
             if (kl === 'deco_offset') {
                 const n = parseFloat(v);
-                if (!isNaN(n)) CONFIG.DECO_OFFSET = Math.max(0, Math.min(100, n));
+                if (!isNaN(n)) CONFIG.DECO_OFFSET = Math.max(-100, Math.min(100, n));
                 return;
             }
             if (kl === 'stream_mode') {
@@ -1406,20 +1537,33 @@ stream_mode = defer`;
             resetConfigurables();
             const report = [];
             const skipped = [];
-            const guardEntries = await scanInjectionGuardEntries(book);
+            const failedBooks = new Set();
+            const verifiedBooks = new Set([book]);
+            STK.sources = {};
+            const guardScan = await scanInjectionGuardEntries(book);
+            const guardEntries = guardScan.hits;
+            const homeBook = await resolveInjectionHomeBook(book, guardScan);
+
+            async function routedUpsert(spec, content, overwrite) {
+                const route = await upsertRoutedEntry(book, homeBook, guardEntries, spec, content, overwrite);
+                STK.sources[spec.title] = route.book;
+                if (route.result !== 'external') verifiedBooks.add(route.book);
+                if (route.result === 'failed') failedBooks.add(route.book);
+                return route;
+            }
 
             // 1. 外观配置：只创建不覆盖，创建后立即读回应用
             if (CONFIG.INJECT_CONFIG_WI) {
-                const confGuard = guardEntries[SPEC.conf.title];
-                const confRes = await upsertEntry(book, SPEC.conf, CONFIG_LIB_DEFAULT, false, confGuard && confGuard.book);
-                if (confRes === 'created') { report.push('外观配置'); wrote = true; }
+                const confRoute = await routedUpsert(SPEC.conf, CONFIG_LIB_DEFAULT, false);
+                const confRes = confRoute.result;
+                if (confRes === 'created') { report.push({ book: confRoute.book, label: '外观配置' }); wrote = true; }
                 else if (confRes === 'failed') failed = true;
                 else if (confRes === 'external') skipped.push(SPEC.conf.title);
-                const confBook = confRes === 'external' ? confGuard.book : book;
+                const confBook = confRoute.book;
                 const confText = await readEntryContent(confBook, SPEC.conf.title);
                 if (confText != null) {
                     applyConfigKV(parseKV(confText));
-                    const vm = confText.match(/模板版本\s*(v\d+)/);
+                    const vm = confText.match(/模板版本\s*(v\d+(?:\.\d+)*)/i);
                     STK.confVer = vm ? vm[1] : '';
                     if (confRes !== 'created' && STK.confVer !== CONF_VERSION && manual) {
                         toastMsg(`外观配置条目为旧模板（${STK.confVer || '未标注'}）。需要新注释可点「重置外观配置」。`, 'info');
@@ -1429,34 +1573,34 @@ stream_mode = defer`;
 
             // 2. 表情包链接库：只创建不覆盖
             if (CONFIG.INJECT_STICKER_WI) {
-                const libGuard = guardEntries[SPEC.lib.title];
-                const libRes = await upsertEntry(book, SPEC.lib, STICKER_LIB_DEFAULT, false, libGuard && libGuard.book);
-                if (libRes === 'created') { report.push('表情包链接库'); wrote = true; }
+                const libRoute = await routedUpsert(SPEC.lib, STICKER_LIB_DEFAULT, false);
+                const libRes = libRoute.result;
+                if (libRes === 'created') { report.push({ book: libRoute.book, label: '表情包链接库' }); wrote = true; }
                 else if (libRes === 'failed') failed = true;
                 else if (libRes === 'external') skipped.push(SPEC.lib.title);
 
-                const libBook = libRes === 'external' ? libGuard.book : book;
+                const libBook = libRoute.book;
                 const libText = await readEntryContent(libBook, SPEC.lib.title);
                 const fromWi = parseStickerLib(libText != null ? libText : STICKER_LIB_DEFAULT);
                 STK.map = Object.assign({}, fromWi, CONFIG.STICKER_MAP || {});
 
                 // 3. 名录：同步内容，但不改动条目开关（respectEnabled）
                 const names = Object.keys(STK.map);
-                const listGuard = guardEntries[SPEC.list.title];
-                const listRes = await upsertEntry(book, SPEC.list, stickerListText(names), CONFIG.STICKER_SYNC_NAMES || manual, listGuard && listGuard.book);
+                const listRoute = await routedUpsert(SPEC.list, stickerListText(names), CONFIG.STICKER_SYNC_NAMES || manual);
+                const listRes = listRoute.result;
                 if (listRes === 'created' || listRes === 'updated') wrote = true;
                 else if (listRes === 'failed') failed = true;
                 else if (listRes === 'external') skipped.push(SPEC.list.title);
-                if (listRes === 'created') report.push('表情包名录');
+                if (listRes === 'created') report.push({ book: listRoute.book, label: '表情包名录' });
             } else {
                 STK.map = Object.assign({}, CONFIG.STICKER_MAP || {});
             }
 
             // 4. 格式条目：随脚本强制启用并更新
             if (CONFIG.AUTO_INJECT_WI || manual) {
-                const fmtGuard = guardEntries[SPEC.format.title];
-                const fmtRes = await upsertEntry(book, SPEC.format, FORMAT_TEXT, CONFIG.WI_FORCE_UPDATE || manual, fmtGuard && fmtGuard.book);
-                if (fmtRes === 'created') { report.push('聊天格式条目'); wrote = true; }
+                const fmtRoute = await routedUpsert(SPEC.format, FORMAT_TEXT, CONFIG.WI_FORCE_UPDATE || manual);
+                const fmtRes = fmtRoute.result;
+                if (fmtRes === 'created') { report.push({ book: fmtRoute.book, label: '聊天格式条目' }); wrote = true; }
                 else if (fmtRes === 'updated') wrote = true;
                 else if (fmtRes === 'failed') failed = true;
                 else if (fmtRes === 'external') skipped.push(SPEC.format.title);
@@ -1465,12 +1609,21 @@ stream_mode = defer`;
             STK.loaded = !failed;
 
             // 开关体检：修复历史脏字段；按设计应保持开启的条目强制扶正；名录的手动开关不受干预
-            await verifyEntryToggles(book);
+            for (const verifiedBook of verifiedBooks) await verifyEntryToggles(verifiedBook);
 
             if (failed) {
-                console.warn(`[聊天气泡] 世界书「${book}」存在写入失败的条目（可能只读/权限受限/命令异常）。`);
-                if (manual) toastMsg(`「${book}」有条目写入失败，可能只读或权限受限，详见控制台。`, 'error');
-            } else if (report.length) toastMsg(`已在「${book}」注入：${report.join('、')}。`, 'success');
+                const names = Array.from(failedBooks);
+                console.warn(`[聊天气泡] 世界书「${names.join('、')}」存在写入失败的条目（可能只读/权限受限/命令异常）。`);
+                if (manual) toastMsg(`「${names.join('、')}」有条目写入失败，可能只读或权限受限，详见控制台。`, 'error');
+            } else if (report.length) {
+                const grouped = {};
+                report.forEach(item => {
+                    if (!grouped[item.book]) grouped[item.book] = [];
+                    grouped[item.book].push(item.label);
+                });
+                const summary = Object.keys(grouped).map(name => `「${name}」：${grouped[name].join('、')}`).join('；');
+                toastMsg(`已注入 ${summary}。`, 'success');
+            }
             else if (manual && skipped.length) toastMsg('检测到聊天气泡条目已存在于其它已启用世界书，本次未重复注入，配置已重新读取。', 'success');
             else if (manual) toastMsg(`「${book}」条目已同步，配置已重新读取。`, 'success');
         } catch (err) {
@@ -1693,7 +1846,7 @@ stream_mode = defer`;
         if (observer) clsList.push('fhb-observer');
         if (foldable) clsList.push('fhb-thmsg');
 
-        return `<div class="${clsList.join(' ')}"${delayStyle} data-kind="${sKind}" data-raw="${escapeAttr(sender)}" data-disp="${escapeAttr(name)}" data-rkind="${rKind}" data-rdisp="${escapeAttr(rName)}" data-grp="${isGroupTarget ? 1 : 0}">${avatarHTML(sKind, sender)}<div class="fhb-col${colCls}"><div class="fhb-meta">${metaInner}</div>${bubble}${status}${decoHTML(sKind)}</div></div>`;
+        return `<div class="${clsList.join(' ')}"${delayStyle} data-kind="${sKind}" data-raw="${escapeAttr(sender)}" data-disp="${escapeAttr(name)}" data-rkind="${rKind}" data-rdisp="${escapeAttr(rName)}" data-grp="${isGroupTarget ? 1 : 0}">${avatarHTML(sKind, sender)}<div class="fhb-col${colCls}"><div class="fhb-meta">${metaInner}</div><div class="fhb-bubble-wrap">${bubble}${decoHTML(sKind)}</div>${status}</div></div>`;
     }
 
     // ---------- 群名识别 ----------
@@ -1940,6 +2093,7 @@ stream_mode = defer`;
 
         const noAnim = textEl.dataset.fhbNoanim === '1';
 
+        let rendered = false;
         ENTRY_RE.lastIndex = 0;
         const html = sanitizeForParse(textEl.innerHTML);
         if (ENTRY_RE.test(html)) {
@@ -1970,11 +2124,19 @@ stream_mode = defer`;
                 textEl.innerHTML = out;
                 cleanSiblings(textEl);
                 groupThreads(textEl);
+                rendered = true;
             }
         } else {
             groupThreads(textEl);
         }
         bindDelegation(textEl);
+        if (rendered && typeof eventEmit === 'function') {
+            const mes = textEl.closest ? textEl.closest('.mes') : null;
+            const messageId = Number(mes && mes.getAttribute('mesid'));
+            if (Number.isInteger(messageId) && messageId >= 0) {
+                void eventEmit(FHB_MESSAGE_RENDERED_EVENT, messageId);
+            }
+        }
     }
 
     function denyClaim(rp, reason) {
@@ -2074,6 +2236,16 @@ stream_mode = defer`;
         if (CONFIG.theme === 'dark') return true;
         if (CONFIG.theme === 'light') return false;
         try {
+            // SmartTheme 的背景经常是透明层或壁纸，正文色比背景亮度更能稳定表示日夜模式：
+            // 深色主题使用亮正文，浅色主题使用暗正文。
+            const smartBodyColor = PW.getComputedStyle(PD.documentElement)
+                .getPropertyValue('--SmartThemeBodyColor').trim();
+            const bodyMatch = smartBodyColor.match(/rgba?\(\s*([\d.]+)[,\s]+([\d.]+)[,\s]+([\d.]+)(?:[,\s/.]+([\d.]+))?/);
+            if (bodyMatch && (bodyMatch[4] === undefined || parseFloat(bodyMatch[4]) >= 0.2)) {
+                const bodyLum = 0.2126 * (+bodyMatch[1]) + 0.7152 * (+bodyMatch[2]) + 0.0722 * (+bodyMatch[3]);
+                return bodyLum >= 155;
+            }
+
             const cands = ['#chat', 'body', 'html'];
             for (const sel of cands) {
                 const el = sel === 'html' ? PD.documentElement : PD.querySelector(sel);
@@ -2136,6 +2308,7 @@ stream_mode = defer`;
                 }
             }
             if (b.bw) s += `--fhb-${k}-bw:${b.bw};`;
+            if (b.ra) s += `--fhb-${k}-radius:${b.ra};`;
         }
         if (CONFIG.DECO_SIZE && String(CONFIG.DECO_SIZE).trim()) {
             s += `--fhb-deco-w:${normWidth(CONFIG.DECO_SIZE) || String(CONFIG.DECO_SIZE).trim()};`;
@@ -2158,7 +2331,12 @@ stream_mode = defer`;
 [data-fhb-noanim="1"] .fhb-msg,[data-fhb-noanim="1"] .fhb-sys,[data-fhb-noanim="1"] .fhb-thread{animation:none!important;opacity:1!important;}
 [data-fhb-noanim="1"] .fhb-bubble{transition:none!important;}
 .fhb-avwrap{position:relative;width:40px;height:40px;flex:none;}
-.fhb-avatar{position:absolute;inset:0;width:100%;height:100%;border-radius:50%;overflow:hidden;border:1.5px solid var(--fhb-accent2);box-shadow:0 3px 10px rgba(0,0,0,.25);z-index:2;}
+.fhb-avatar{position:absolute;inset:0;width:100%;height:100%;border-radius:50%;overflow:hidden;border:1.5px solid var(--fhb-accent2);box-shadow:0 3px 10px rgba(0,0,0,.25);z-index:2;transform:scale(1);transform-origin:left top;transition:transform .3s cubic-bezier(.22,.61,.36,1),box-shadow .3s ease;transition-delay:0s;}
+.fhb-user .fhb-avatar{transform-origin:right top;}
+.fhb-avwrap:hover{z-index:30;}
+.fhb-avwrap:hover .fhb-avatar{transform:scale(2.25);transition-delay:.4s;box-shadow:0 12px 30px rgba(0,0,0,.48),0 0 0 2px var(--fhb-accent-soft);}
+.fhb-avwrap .fhb-ring{transition:opacity .18s ease .25s;}
+.fhb-avwrap:hover .fhb-ring{opacity:0;transition-delay:.4s;}
 .fhb-av-char{background:linear-gradient(135deg,var(--fhb-accent) 0%,rgba(0,0,0,.6) 100%);border-color:var(--fhb-accent2);box-shadow:0 3px 12px rgba(0,0,0,.35),inset 0 0 8px rgba(255,255,255,.18);}
 .fhb-av-user{background:linear-gradient(135deg,#3a3f45 0%,#16191d 100%);}
 .fhb-avi{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-family:var(--fhb-serif);color:#f6f4ee;font-size:14px;letter-spacing:.05em;}
@@ -2169,9 +2347,10 @@ stream_mode = defer`;
 .fhb-ring-arc{transform-box:fill-box;transform-origin:center;animation:fhbSpin 26s linear infinite;}
 .fhb-ring-stem{fill:none;stroke:var(--fhb-accent);stroke-width:1.4;stroke-linecap:round;opacity:.85;}
 .fhb-ring-dot{fill:var(--fhb-accent);opacity:.9;}
-.fhb-col{position:relative;display:flex;flex-direction:column;gap:4px;max-width:min(72%,480px);min-width:0;}
+.fhb-col{position:relative;display:flex;flex-direction:column;align-items:flex-start;gap:4px;max-width:min(72%,480px);min-width:0;}
 .fhb-col-wide{max-width:min(86%,440px);}
-.fhb-user .fhb-col{align-items:flex-end;text-align:right;}
+.fhb-user .fhb-col{align-items:flex-end;text-align:left;}
+.fhb-bubble-wrap{position:relative;display:block;width:fit-content;max-width:100%;transition:transform .28s cubic-bezier(.22,.61,.36,1);}
 .fhb-meta{display:flex;align-items:baseline;gap:6px;font-size:10.5px;letter-spacing:.13em;text-transform:uppercase;color:var(--fhb-meta);font-variant-numeric:tabular-nums;flex-wrap:wrap;}
 .fhb-user .fhb-meta{justify-content:flex-end;}
 .fhb-name{font-family:var(--fhb-serif);font-weight:700;}
@@ -2179,15 +2358,16 @@ stream_mode = defer`;
 .fhb-arr{width:12px;height:9px;display:inline-block;flex:none;opacity:.8;}
 .fhb-sep{opacity:.6;}
 .fhb-bubble{position:relative;padding:10px 14px;border-radius:14px;background:var(--fhb-bo-bg);color:var(--fhb-bo-tx);border:1px solid var(--fhb-bo-br);box-shadow:var(--fhb-shadow);transition:var(--fhb-trans);font-size:14.5px;line-height:1.65;word-break:break-word;max-width:100%;}
-.fhb-user .fhb-bubble{background:var(--fhb-u-bg,var(--fhb-bu-bg));color:var(--fhb-u-tx,var(--fhb-bu-tx));border-color:var(--fhb-u-bd,transparent);border-style:var(--fhb-u-bs,solid);border-width:var(--fhb-u-bw,1px);border-image:var(--fhb-u-bi,none);}
-.fhb-bubble:hover{transform:translateY(-2px);}
+.fhb-msg.fhb-k-char .fhb-bubble{border-radius:var(--fhb-c-radius,14px);}
+.fhb-user .fhb-bubble{background:var(--fhb-u-bg,var(--fhb-bu-bg));color:var(--fhb-u-tx,var(--fhb-bu-tx));border-color:var(--fhb-u-bd,transparent);border-style:var(--fhb-u-bs,solid);border-width:var(--fhb-u-bw,1px);border-radius:var(--fhb-u-radius,14px);border-image:var(--fhb-u-bi,none);}
+.fhb-bubble-wrap:hover{transform:translateY(-2px);}
 .fhb-other .fhb-bubble:not(.fhb-transfer):not(.fhb-rp):not(.fhb-sticker)::before,.fhb-obs .fhb-bubble:not(.fhb-transfer):not(.fhb-rp):not(.fhb-sticker)::before{content:'';position:absolute;left:-6px;top:15px;border-style:solid;border-width:5px 8px 5px 0;border-color:transparent var(--fhb-n-tail,var(--fhb-bo-bg)) transparent transparent;}
 .fhb-user .fhb-bubble:not(.fhb-sticker):not(.fhb-rp):not(.fhb-transfer)::after{content:'';position:absolute;right:-6px;top:15px;border-style:solid;border-width:5px 0 5px 8px;border-color:transparent transparent transparent var(--fhb-u-tail,var(--fhb-bu-tail));}
-.fhb-k-char .fhb-bubble:not(.fhb-sticker):not(.fhb-rp):not(.fhb-transfer){background:var(--fhb-c-bg,var(--fhb-char-bg));color:var(--fhb-c-tx,var(--fhb-bo-tx));border:var(--fhb-c-bw,1px) var(--fhb-c-bs,solid) var(--fhb-c-bd,var(--fhb-char-br));border-left:3px var(--fhb-c-bs,solid) var(--fhb-c-bd,var(--fhb-accent));border-image:var(--fhb-c-bi,none);box-shadow:var(--fhb-char-shadow);}
+.fhb-k-char .fhb-bubble:not(.fhb-sticker):not(.fhb-rp):not(.fhb-transfer){background:var(--fhb-c-bg,var(--fhb-char-bg));color:var(--fhb-c-tx,var(--fhb-bo-tx));border:var(--fhb-c-bw,1px) var(--fhb-c-bs,solid) var(--fhb-c-bd,var(--fhb-char-br));border-left:3px var(--fhb-c-bs,solid) var(--fhb-c-bd,var(--fhb-accent));border-radius:var(--fhb-c-radius,14px);border-image:var(--fhb-c-bi,none);box-shadow:var(--fhb-char-shadow);}
 .fhb-k-char .fhb-bubble:not(.fhb-sticker):not(.fhb-rp):not(.fhb-transfer)::after{content:'';position:absolute;left:12px;right:12px;top:0;height:1px;background:linear-gradient(90deg,transparent,var(--fhb-accent2),transparent);opacity:.7;pointer-events:none;}
 .fhb-k-char .fhb-bubble:not(.fhb-sticker):not(.fhb-rp):not(.fhb-transfer):hover{box-shadow:0 12px 28px rgba(0,0,0,.3),0 0 0 1px var(--fhb-accent2),0 0 20px var(--fhb-char-glow);}
 .fhb-k-char .fhb-bubble:not(.fhb-transfer):not(.fhb-rp):not(.fhb-sticker)::before {border-right-color: var(--fhb-c-tail, var(--fhb-bo-bg));}
-.fhb-msg.fhb-k-npc .fhb-bubble{background:var(--fhb-n-bg,var(--fhb-bo-bg));color:var(--fhb-n-tx,var(--fhb-bo-tx));border:var(--fhb-n-bw,1px) var(--fhb-n-bs,solid) var(--fhb-n-bd,var(--fhb-bo-br));border-image:var(--fhb-n-bi,none);}
+.fhb-msg.fhb-k-npc .fhb-bubble{background:var(--fhb-n-bg,var(--fhb-bo-bg));color:var(--fhb-n-tx,var(--fhb-bo-tx));border:var(--fhb-n-bw,1px) var(--fhb-n-bs,solid) var(--fhb-n-bd,var(--fhb-bo-br));border-radius:var(--fhb-n-radius,14px);border-image:var(--fhb-n-bi,none);}
 .fhb-obs.fhb-k-char .fhb-bubble:not(.fhb-sticker){border-left-style:solid;}
 .fhb-obs .fhb-bubble:not(.fhb-sticker):not(.fhb-rp):not(.fhb-transfer){border-left-style:dashed;}
 .fhb-user .fhb-bubble:not(.fhb-sticker):not(.fhb-rp):not(.fhb-transfer){border:var(--fhb-u-bw,1px) var(--fhb-u-bs,solid) var(--fhb-u-bd,var(--fhb-bu-br));border-image:var(--fhb-u-bi,none);box-shadow:var(--fhb-shadow),inset 0 1px 0 rgba(255,255,255,.14);}
@@ -2383,6 +2563,38 @@ stream_mode = defer`;
     setTimeout(() => { resolveContext(); processAll(); refreshAllAvatars(); restickerAll(); applyDecos(); }, 1600);
 
     // ---------- 事件绑定 ----------
+    const editRenderTimers = new Map();
+
+    function scheduleRenderAfterEditing(id, delay) {
+        const messageId = Number(id);
+        if (!Number.isInteger(messageId) || messageId < 0) return;
+
+        const previous = editRenderTimers.get(messageId);
+        if (previous) clearTimeout(previous);
+        const startedAt = Date.now();
+
+        const renderWhenReady = () => {
+            editRenderTimers.delete(messageId);
+            const textEl = PD.querySelector(`#chat .mes[mesid="${messageId}"] .mes_text`);
+            if (!textEl) return;
+
+            // 酒馆会先发出编辑事件、稍后才移除 textarea；短暂等待编辑态真正结束，避免丢掉本次重渲染。
+            if (anyEditing() || isEditing(textEl)) {
+                if (Date.now() - startedAt < 5000) {
+                    editRenderTimers.set(messageId, setTimeout(renderWhenReady, 100));
+                }
+                return;
+            }
+
+            resolveContext();
+            transformElement(textEl, { force: true });
+            restickerAll();
+            applyDecos();
+        };
+
+        editRenderTimers.set(messageId, setTimeout(renderWhenReady, delay == null ? 80 : delay));
+    }
+
     if (typeof eventOn === 'function' && typeof tavern_events !== 'undefined') {
 
         // 生成开始：进入流式守卫
@@ -2444,7 +2656,10 @@ stream_mode = defer`;
             });
         }
         if (tavern_events.MESSAGE_UPDATED) {
-            eventOn(tavern_events.MESSAGE_UPDATED, (id) => setTimeout(() => { processById(id); restickerAll(); }, 120));
+            eventOn(tavern_events.MESSAGE_UPDATED, (id) => scheduleRenderAfterEditing(id, 120));
+        }
+        if (tavern_events.MESSAGE_EDITED) {
+            eventOn(tavern_events.MESSAGE_EDITED, (id) => scheduleRenderAfterEditing(id, 0));
         }
         if (tavern_events.MESSAGE_SWIPED) {
             eventOn(tavern_events.MESSAGE_SWIPED, (id) => setTimeout(() => { resolveContext(); processById(id); restickerAll(); }, 80));
@@ -2452,6 +2667,7 @@ stream_mode = defer`;
         if (tavern_events.CHAT_CHANGED) {
             let chatTimer = null;
             eventOn(tavern_events.CHAT_CHANGED, () => {
+                closeAppearancePanel();
                 clearTimeout(chatTimer);
                 chatTimer = setTimeout(async () => {
                     GEN.active = false;
@@ -2539,6 +2755,8 @@ stream_mode = defer`;
                     ob.disconnect();
                     if (PW.__FHB_OB === ob) PW.__FHB_OB = null;
                 } catch (e3) {}
+                editRenderTimers.forEach(timerId => clearTimeout(timerId));
+                editRenderTimers.clear();
                 if (GEN.poller) { clearInterval(GEN.poller); GEN.poller = null; }
                 if (GEN.timer) { clearTimeout(GEN.timer); GEN.timer = null; }
             });
@@ -2547,9 +2765,139 @@ stream_mode = defer`;
         console.warn('[聊天气泡] MutationObserver 挂载失败：', e);
     }
 
+    // ---------- 外观配置悬浮面板 ----------
+    let appearancePanel = null;
+
+    async function locateAppearanceConfig() {
+        if (!hasActiveChat()) throw Error('当前没有打开的角色聊天，无法定位世界书。');
+        const primaryBook = await resolveBookName();
+        if (!primaryBook || !(await worldbookExists(primaryBook))) {
+            throw Error('未找到当前角色绑定的世界书，请先在世界书面板完成绑定。');
+        }
+        STK.book = primaryBook;
+
+        const candidates = [];
+        if (STK.sources[SPEC.conf.title]) candidates.push(STK.sources[SPEC.conf.title]);
+        candidates.push(primaryBook);
+        for (const book of [...new Set(candidates.filter(Boolean))]) {
+            const content = await readEntryContent(book, SPEC.conf.title);
+            if (content != null) return { primaryBook, book, content };
+        }
+
+        const scan = await scanInjectionGuardEntries(primaryBook);
+        const external = scan.hits[SPEC.conf.title];
+        if (external && external.book) {
+            const content = await readEntryContent(external.book, SPEC.conf.title);
+            if (content != null) return { primaryBook, book: external.book, content };
+        }
+        return { primaryBook, book: primaryBook, content: CONFIG_LIB_DEFAULT };
+    }
+
+    async function loadAppearancePanelConfig() {
+        const located = await locateAppearanceConfig();
+        STK.sources[SPEC.conf.title] = located.book;
+        return {
+            book: located.book,
+            config: parseAppearanceConfigText(located.content)
+        };
+    }
+
+    async function saveAppearancePanelConfig(model) {
+        if (STK.busy) throw Error('世界书正在更新，请稍后再保存。');
+        STK.busy = true;
+        try {
+            const located = await locateAppearanceConfig();
+            const content = serializeAppearanceConfigText(model, CONF_VERSION);
+            const result = await upsertEntry(located.book, SPEC.conf, content, true);
+            if (result === 'failed') throw Error(`无法写入世界书「${located.book}」，请检查世界书权限。`);
+
+            STK.sources[SPEC.conf.title] = located.book;
+            STK.lastWrite = Date.now();
+            STK.confVer = CONF_VERSION;
+            resetConfigurables();
+            applyConfigKV(parseKV(content));
+            refreshVisuals();
+            processAll({ force: true });
+            console.info(`[聊天气泡] 外观配置已由可视化面板保存到「${located.book}」并应用。`);
+            toastMsg('外观配置已保存并应用。', 'success');
+            return { book: located.book };
+        } finally {
+            STK.busy = false;
+        }
+    }
+
+    const APPEARANCE_THEME_VARS = [
+        '--SmartThemeBodyColor', '--SmartThemeEmColor', '--SmartThemeQuoteColor',
+        '--SmartThemeBlurTintColor', '--SmartThemeChatTintColor', '--SmartThemeBorderColor',
+        '--SmartThemeUserMesBlurTintColor', '--SmartThemeBotMesBlurTintColor', '--shadowColor'
+    ];
+
+    function syncAppearancePanelTheme(doc) {
+        if (!doc || !doc.documentElement) return;
+        try {
+            const hostRoot = PW.getComputedStyle(PD.documentElement);
+            const hostBody = PD.body ? PW.getComputedStyle(PD.body) : null;
+            for (const name of APPEARANCE_THEME_VARS) {
+                const value = (hostRoot.getPropertyValue(name) || (hostBody && hostBody.getPropertyValue(name)) || '').trim();
+                if (value) doc.documentElement.style.setProperty(name, value);
+                else doc.documentElement.style.removeProperty(name);
+            }
+            doc.documentElement.dataset.fhbcTheme = detectDark() ? 'dark' : 'light';
+        } catch (error) {
+            console.warn('[聊天气泡] 同步外观面板主题失败：', error);
+        }
+    }
+
+    function closeAppearancePanel() {
+        if (!appearancePanel) return;
+        if (appearancePanel.themeTimer) clearInterval(appearancePanel.themeTimer);
+        try { appearancePanel.app.unmount(); } catch (e) {}
+        try { appearancePanel.destroyStyle(); } catch (e) {}
+        appearancePanel.$iframe.remove();
+        appearancePanel = null;
+    }
+
+    function openAppearancePanel() {
+        if (appearancePanel) {
+            appearancePanel.$iframe.css('display', 'block');
+            return;
+        }
+        const stale = PD.getElementById('fhb-appearance-panel-frame');
+        if (stale) stale.remove();
+
+        const $iframe = createScriptIdIframe()
+            .attr({
+                id: 'fhb-appearance-panel-frame',
+                title: '聊天气泡外观配置',
+                style: 'position:fixed;inset:0;width:100vw;height:100dvh;border:0;background:transparent;z-index:2147483000'
+            })
+            .on('load', () => {
+                const frame = $iframe[0];
+                const doc = frame.contentDocument;
+                if (!doc) {
+                    $iframe.remove();
+                    toastMsg('外观配置面板加载失败。', 'error');
+                    return;
+                }
+                syncAppearancePanelTheme(doc);
+                const { destroy } = teleportStyle(doc.head);
+                const api = {
+                    load: loadAppearancePanelConfig,
+                    save: saveAppearancePanelConfig,
+                    close: closeAppearancePanel
+                };
+                const app = createApp(AppearancePanel, { api });
+                app.mount(doc.body);
+                const themeTimer = setInterval(() => syncAppearancePanelTheme(doc), 600);
+                appearancePanel = { $iframe, app, destroyStyle: destroy, themeTimer };
+            })
+            .appendTo(PD.body);
+    }
+
     // ---------- 脚本按钮 ----------
     if (typeof appendInexistentScriptButtons === 'function') {
         appendInexistentScriptButtons([
+            { name: '外观配置面板', visible: true },
             { name: '重刷聊天气泡', visible: true },
             { name: '注入/更新世界书', visible: true },
             { name: '重置外观配置', visible: true }
@@ -2559,6 +2907,8 @@ stream_mode = defer`;
     let resetArmedAt = 0;
 
     if (typeof eventOn === 'function' && typeof getButtonEvent === 'function') {
+        eventOn(getButtonEvent('外观配置面板'), openAppearancePanel);
+
         eventOn(getButtonEvent('重刷聊天气泡'), () => {
             if (anyEditing()) {
                 toastMsg('请先关闭消息编辑，再重刷气泡。', 'warning');
@@ -2591,7 +2941,8 @@ stream_mode = defer`;
                 toastMsg('当前没有打开的角色聊天，无法定位世界书。', 'warning');
                 return;
             }
-            const book = STK.book || await resolveBookName();
+            const primaryBook = STK.book || await resolveBookName();
+            const book = STK.sources[SPEC.conf.title] || primaryBook;
             if (!book || !(await worldbookExists(book))) {
                 toastMsg('未找到可写入的世界书，请先为当前角色绑定一本已存在的世界书。', 'error');
                 return;
@@ -2608,6 +2959,8 @@ stream_mode = defer`;
             refreshVisuals();
         });
     }
+
+    $(window).on('pagehide', closeAppearancePanel);
 }
 
 // 等待宿主页面就绪后再启动，并向用户暴露初始化异常（errorCatched 不存在时降级为控制台输出）
