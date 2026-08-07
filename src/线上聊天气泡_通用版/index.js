@@ -7,8 +7,11 @@ import {
 } from './appearance-config';
 
 // ============================================================
-// 线上聊天气泡_通用版 v15.2
-// 变更：用户名替换在气泡渲染后自动补应用；消息编辑完成后可靠重渲染；用户气泡内文字左对齐
+// 线上聊天气泡_通用版 v15.5
+// 变更：语音/表情装饰锚定本体；可关闭 image 自动生图；移动端折叠操作改为紧凑组合
+// v15.4：修复移动端标题/系统时间/文件名排版；图片装饰改为锚定相框；取图失败显示关键词
+// v15.3：外观配置与可视化面板新增气泡整体缩放、字号、内边距、宽度、头像和消息间距设置
+// v15.2：用户名替换在气泡渲染后自动补应用；消息编辑完成后可靠重渲染；用户气泡内文字左对齐
 // v15.1：外观面板跟随酒馆主题并支持隐藏滚动条的内部滚动；新增头像悬停放大与气泡圆角配置
 // v14.6：缺失条目会补入同组聊天气泡条目最集中的世界书，不再固定写入角色主世界书
 // v14.5：注入前检查全局世界书、角色附加世界书与聊天世界书，避免重复注入同名条目
@@ -26,7 +29,7 @@ const FHB_STYLE_ID = 'fhb-style-chatbubble';
 const FHB_MESSAGE_RENDERED_EVENT = 'fhb_message_rendered';
 
 function initChatBubbles() {
-    const CONF_VERSION = 'v15.2';
+    const CONF_VERSION = 'v15.5';
 
     const CONFIG = {
         // —— 以下带 * 的项均可被世界书「外观配置」条目覆盖，注释掉即回退到此处默认 ——
@@ -46,8 +49,21 @@ function initChatBubbles() {
         DECO_SIZE: '',          // * 装饰宽度
         DECO_OFFSET: '',        // * 装饰外移比例 -100~100
         BUBBLE: {},             // * bubble.<user|char|npc>.<bg|tx|bd|bs|bw|ra>
+        LAYOUT: {               // * 气泡整体尺寸与排版
+            scale: 1,
+            fontSize: 14.5,
+            lineHeight: 1.65,
+            paddingX: 14,
+            paddingY: 10,
+            maxWidthPercent: 72,
+            maxWidthPx: 480,
+            avatarSize: 40,
+            gap: 11,
+            spacing: 14
+        },
 
         STICKER_SIZE: '',       // *
+        IMAGE_AUTO_GENERATE: true, // * image 类型是否自动请求随机图片
         theme: 'auto',          // *
         imgW: 640,              // *
         imgH: 400,              // *
@@ -78,8 +94,8 @@ function initChatBubbles() {
     const CONFIGURABLE_KEYS = [
         'USER_AVATAR', 'CHAR_AVATAR', 'NPC_AVATARS', 'NPC_ALIASES',
         'ACCENT_DARK', 'ACCENT_LIGHT', 'ACCENT2_DARK', 'ACCENT2_LIGHT',
-        'CHAR_EXTRA_ALIASES', 'DECO', 'DECO_SIZE', 'DECO_OFFSET', 'BUBBLE',
-        'STICKER_SIZE', 'theme', 'imgW', 'imgH', 'collapseMin', 'STREAM_MODE'
+        'CHAR_EXTRA_ALIASES', 'DECO', 'DECO_SIZE', 'DECO_OFFSET', 'BUBBLE', 'LAYOUT',
+        'STICKER_SIZE', 'IMAGE_AUTO_GENERATE', 'theme', 'imgW', 'imgH', 'collapseMin', 'STREAM_MODE'
     ];
     const FACTORY = {};
     CONFIGURABLE_KEYS.forEach(k => {
@@ -472,7 +488,11 @@ function initChatBubbles() {
             }
             col.querySelectorAll('.fhb-deco').forEach(n => n.remove());
             const html = decoHTML(m.dataset.kind);
-            if (html) wrap.insertAdjacentHTML('beforeend', html);
+            const imageFrame = wrap.querySelector(':scope > .fhb-fig > .fhb-imgframe');
+            const voiceBubble = wrap.querySelector(':scope > .fhb-voice');
+            const stickerFrame = wrap.querySelector(':scope > .fhb-sticker > .fhb-sticker-frame');
+            const target = imageFrame || voiceBubble || stickerFrame || wrap;
+            if (html) target.insertAdjacentHTML('beforeend', html);
         });
     }
 
@@ -638,7 +658,27 @@ accent2_light = #97722c
 # bubble.npc.border_radius = 8px
 
 # ------------------------------------------------------------
-# 四、气泡四角装饰图
+# 四、气泡尺寸与排版
+# ------------------------------------------------------------
+# 整体缩放：1 = 原始大小，0.9 = 缩小到 90%，1.1 = 放大到 110%。
+message_scale = 1
+
+# 以下尺寸均不带单位，按 px 处理；行高是倍数。
+bubble_font_size = 14.5
+bubble_line_height = 1.65
+bubble_padding_x = 14
+bubble_padding_y = 10
+
+# 普通气泡最大宽度同时受百分比和像素上限约束，取较小值。
+bubble_max_width_percent = 72
+bubble_max_width_px = 480
+
+avatar_size = 40
+message_gap = 11
+message_spacing = 14
+
+# ------------------------------------------------------------
+# 五、气泡四角装饰图
 # ------------------------------------------------------------
 # 在气泡的四个角挂小图或 gif（比如缎带、小花、贴纸），不挡点击。
 # 键名格式：deco.谁.角位
@@ -662,13 +702,16 @@ accent2_light = #97722c
 # deco_offset = 40
 
 # ------------------------------------------------------------
-# 五、其它
+# 六、其它
 # ------------------------------------------------------------
 # 配色跟随：auto 自动判断你的酒馆是深色还是浅色 / dark 强制深色 / light 强制浅色
 theme = auto
 
 # 表情包图片宽度，留空为自适应。填法：120px
 sticker_size =
+
+# image 类型是否自动联网生成随机图片。关闭后不发起取图请求，只显示描述和关键词。
+image_auto_generate = true
 
 # image 类型随机配图的尺寸，宽x高
 image_size = 640x400
@@ -1362,6 +1405,18 @@ stream_mode = defer`;
         border_width: 'bw', width: 'bw', bw: 'bw',
         border_radius: 'ra', radius: 'ra', br: 'ra'
     };
+    const LAYOUT_KEY_MAP = {
+        message_scale: ['scale', 0.5, 2],
+        bubble_font_size: ['fontSize', 8, 40],
+        bubble_line_height: ['lineHeight', 1, 3],
+        bubble_padding_x: ['paddingX', 0, 48],
+        bubble_padding_y: ['paddingY', 0, 48],
+        bubble_max_width_percent: ['maxWidthPercent', 30, 100],
+        bubble_max_width_px: ['maxWidthPx', 160, 1200],
+        avatar_size: ['avatarSize', 20, 120],
+        message_gap: ['gap', 0, 48],
+        message_spacing: ['spacing', 0, 80]
+    };
 
     function normWidth(v) {
         v = String(v || '').trim();
@@ -1447,9 +1502,23 @@ stream_mode = defer`;
                 if (name && v) CONFIG.NPC_AVATARS[name] = v;
                 return;
             }
+
+            if (kl === 'image_auto_generate') {
+                const t = v.toLowerCase();
+                if (['true', '1', 'yes', 'on', '是', '开启'].includes(t)) CONFIG.IMAGE_AUTO_GENERATE = true;
+                if (['false', '0', 'no', 'off', '否', '关闭'].includes(t)) CONFIG.IMAGE_AUTO_GENERATE = false;
+                return;
+            }
             if (!v) return;
 
             if (simple[kl]) { CONFIG[simple[kl]] = v; return; }
+
+            if (LAYOUT_KEY_MAP[kl]) {
+                const [key, min, max] = LAYOUT_KEY_MAP[kl];
+                const n = parseFloat(v);
+                if (!isNaN(n)) CONFIG.LAYOUT[key] = Math.max(min, Math.min(max, n));
+                return;
+            }
 
             if (kl === 'deco_offset') {
                 const n = parseFloat(v);
@@ -1706,12 +1775,22 @@ stream_mode = defer`;
             }
 
             case 'image': {
+                const rawKeywords = (extra || '').split(/[,，]/).map(k => stripTags(k).trim()).filter(Boolean).join(' · ');
+                if (!CONFIG.IMAGE_AUTO_GENERATE) {
+                    return `<div class="fhb-bubble fhb-image-text">
+                        ${content ? `<span class="fhb-image-desc">${content}</span>` : ''}
+                        ${rawKeywords ? `<span class="fhb-kw">${escapeHTML(rawKeywords)}</span>` : ''}
+                    </div>`;
+                }
                 const kws = (extra || '').split(/[,，]/).map(k => k.replace(/[^a-zA-Z0-9 -]/g, '').trim()).filter(Boolean).join(',');
+                const kwLabel = kws ? kws.replace(/,/g, ' · ') : (content || '暂无图片关键词');
                 const url = `https://loremflickr.com/${CONFIG.imgW}/${CONFIG.imgH}/${kws || 'night,city'}/all`;
                 return `<figure class="fhb-fig">
-                    <div class="fhb-imgwrap">
-                        <div class="fhb-imgfb"><span class="fhb-imgfb-ic">${ICON.imgph}</span><span class="fhb-imgfb-tx">影像载入中</span></div>
-                        <img class="fhb-img" src="${url}" alt="${escapeAttr(content)}" loading="lazy" onload="this.previousElementSibling.style.display='none'" onerror="this.style.display='none';var f=this.previousElementSibling;f.style.display='flex';f.querySelector('.fhb-imgfb-tx').textContent='影像未能送达';">
+                    <div class="fhb-imgframe">
+                        <div class="fhb-imgwrap">
+                            <div class="fhb-imgfb" data-fallback="${escapeAttr(kwLabel)}"><span class="fhb-imgfb-ic">${ICON.imgph}</span><span class="fhb-imgfb-tx">影像载入中</span></div>
+                            <img class="fhb-img" src="${url}" alt="${escapeAttr(content)}" loading="lazy" onload="this.previousElementSibling.style.display='none'" onerror="this.style.display='none';var f=this.previousElementSibling;f.style.display='flex';f.classList.add('is-failed');f.querySelector('.fhb-imgfb-tx').textContent=f.dataset.fallback||'暂无图片关键词';">
+                        </div>
                     </div>
                     <figcaption>${content}${kws ? `<span class="fhb-kw">${kws.replace(/,/g, ' · ')}</span>` : ''}</figcaption>
                 </figure>`;
@@ -1730,7 +1809,7 @@ stream_mode = defer`;
                     ? `<img class="fhb-stk-img" src="${escapeAttr(src)}" alt="${attrRaw(key)}" loading="lazy" onerror="${STK_FALLBACK}">`
                     : '';
                 return `<div class="fhb-bubble fhb-sticker" data-stk="${attrRaw(key)}">
-                    ${img}<span class="${txtCls}"${hide}>${raw}</span>
+                    <span class="fhb-sticker-frame">${img}<span class="${txtCls}"${hide}>${raw}</span></span>
                     ${extra ? `<div class="fhb-sticker-cap">${extra}</div>` : ''}
                 </div>`;
             }
@@ -1982,7 +2061,9 @@ stream_mode = defer`;
 
     function refreshThreadCard(wrap) {
         const msgs = Array.from(wrap.querySelectorAll('.fhb-thmsg'));
-        const count = wrap.querySelectorAll('.fhb-thmsg, .fhb-sys').length;
+        // 清理旧版线程卡片遗留的条数角标；折叠提示只保留展开/收起。
+        const legacyCount = wrap.querySelector('.fhb-th-count');
+        if (legacyCount) legacyCount.remove();
 
         const last = msgs[msgs.length - 1];
         const bub = last && (last.querySelector('.fhb-bubble') || last.querySelector('figcaption'));
@@ -1991,10 +2072,8 @@ stream_mode = defer`;
 
         const titleEl = wrap.querySelector('.fhb-th-title');
         const peekEl = wrap.querySelector('.fhb-th-peek');
-        const countEl = wrap.querySelector('.fhb-th-count');
         if (titleEl) titleEl.textContent = threadTitle(msgs);
         if (peekEl) peekEl.textContent = '最近 · ' + peek;
-        if (countEl) countEl.textContent = count + ' 条';
     }
 
     function bindThreadHead(wrap) {
@@ -2038,8 +2117,9 @@ stream_mode = defer`;
                         <span class="fhb-th-title"></span>
                         <span class="fhb-th-peek"></span>
                     </span>
-                    <span class="fhb-th-count"></span>
-                    <span class="fhb-th-toggle"><span class="fhb-th-tx">展开</span><svg class="fhb-th-caret" viewBox="0 0 10 6" aria-hidden="true"><path d="M1 1l4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg></span>
+                    <span class="fhb-th-actions">
+                        <span class="fhb-th-toggle"><span class="fhb-th-tx">展开</span><svg class="fhb-th-caret" viewBox="0 0 10 6" aria-hidden="true"><path d="M1 1l4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg></span>
+                    </span>
                 </button>
                 <div class="fhb-thread-body"><div class="fhb-thread-inner"></div></div>`;
             textEl.insertBefore(wrap, run[0]);
@@ -2316,6 +2396,11 @@ stream_mode = defer`;
         if (CONFIG.DECO_OFFSET !== '' && CONFIG.DECO_OFFSET != null && !isNaN(parseFloat(CONFIG.DECO_OFFSET))) {
             s += `--fhb-deco-o:${parseFloat(CONFIG.DECO_OFFSET)}%;`;
         }
+        const l = CONFIG.LAYOUT || {};
+        s += `--fhb-scale:${l.scale};--fhb-font-size:${l.fontSize}px;--fhb-line-height:${l.lineHeight};`;
+        s += `--fhb-pad-x:${l.paddingX}px;--fhb-pad-y:${l.paddingY}px;`;
+        s += `--fhb-max-w-percent:${l.maxWidthPercent}%;--fhb-max-w-px:${l.maxWidthPx}px;`;
+        s += `--fhb-avatar-size:${l.avatarSize}px;--fhb-msg-gap:${l.gap}px;--fhb-msg-spacing:${l.spacing}px;`;
         return s;
     }
 
@@ -2325,12 +2410,12 @@ stream_mode = defer`;
 
     function buildCSS(p) {
         return `
-.fhb-msg,.fhb-sys,.fhb-thread{${tokenCSS(p)}--fhb-serif:Didot,'Bodoni MT','Playfair Display','Songti SC','STSong',Georgia,serif;--fhb-sans:'Helvetica Neue','Avenir Next',Arial,'PingFang SC','Microsoft YaHei',sans-serif;--fhb-trans:all .28s cubic-bezier(.22,.61,.36,1);}
-.fhb-msg{display:flex;align-items:flex-start;gap:11px;margin:14px 2px;opacity:0;animation:fhbIn .5s ease forwards;font-family:var(--fhb-sans);color:var(--fhb-ink);max-width:100%;}
+.fhb-msg,.fhb-sys,.fhb-thread{${tokenCSS(p)}--fhb-serif:Didot,'Bodoni MT','Playfair Display','Songti SC','STSong',Georgia,serif;--fhb-sans:'Helvetica Neue','Avenir Next',Arial,'PingFang SC','Microsoft YaHei',sans-serif;--fhb-trans:all .28s cubic-bezier(.22,.61,.36,1);zoom:var(--fhb-scale,1);}
+.fhb-msg{display:flex;align-items:flex-start;gap:var(--fhb-msg-gap,11px);margin:var(--fhb-msg-spacing,14px) 2px;opacity:0;animation:fhbIn .5s ease forwards;font-family:var(--fhb-sans);color:var(--fhb-ink);max-width:100%;}
 .fhb-msg.fhb-user{flex-direction:row-reverse;}
 [data-fhb-noanim="1"] .fhb-msg,[data-fhb-noanim="1"] .fhb-sys,[data-fhb-noanim="1"] .fhb-thread{animation:none!important;opacity:1!important;}
 [data-fhb-noanim="1"] .fhb-bubble{transition:none!important;}
-.fhb-avwrap{position:relative;width:40px;height:40px;flex:none;}
+.fhb-avwrap{position:relative;width:var(--fhb-avatar-size,40px);height:var(--fhb-avatar-size,40px);flex:none;}
 .fhb-avatar{position:absolute;inset:0;width:100%;height:100%;border-radius:50%;overflow:hidden;border:1.5px solid var(--fhb-accent2);box-shadow:0 3px 10px rgba(0,0,0,.25);z-index:2;transform:scale(1);transform-origin:left top;transition:transform .3s cubic-bezier(.22,.61,.36,1),box-shadow .3s ease;transition-delay:0s;}
 .fhb-user .fhb-avatar{transform-origin:right top;}
 .fhb-avwrap:hover{z-index:30;}
@@ -2347,7 +2432,7 @@ stream_mode = defer`;
 .fhb-ring-arc{transform-box:fill-box;transform-origin:center;animation:fhbSpin 26s linear infinite;}
 .fhb-ring-stem{fill:none;stroke:var(--fhb-accent);stroke-width:1.4;stroke-linecap:round;opacity:.85;}
 .fhb-ring-dot{fill:var(--fhb-accent);opacity:.9;}
-.fhb-col{position:relative;display:flex;flex-direction:column;align-items:flex-start;gap:4px;max-width:min(72%,480px);min-width:0;}
+.fhb-col{position:relative;display:flex;flex-direction:column;align-items:flex-start;gap:4px;max-width:min(var(--fhb-max-w-percent,72%),var(--fhb-max-w-px,480px));min-width:0;}
 .fhb-col-wide{max-width:min(86%,440px);}
 .fhb-user .fhb-col{align-items:flex-end;text-align:left;}
 .fhb-bubble-wrap{position:relative;display:block;width:fit-content;max-width:100%;transition:transform .28s cubic-bezier(.22,.61,.36,1);}
@@ -2357,7 +2442,7 @@ stream_mode = defer`;
 .fhb-rcp{font-family:var(--fhb-serif);font-weight:700;color:var(--fhb-accent2);}
 .fhb-arr{width:12px;height:9px;display:inline-block;flex:none;opacity:.8;}
 .fhb-sep{opacity:.6;}
-.fhb-bubble{position:relative;padding:10px 14px;border-radius:14px;background:var(--fhb-bo-bg);color:var(--fhb-bo-tx);border:1px solid var(--fhb-bo-br);box-shadow:var(--fhb-shadow);transition:var(--fhb-trans);font-size:14.5px;line-height:1.65;word-break:break-word;max-width:100%;}
+.fhb-bubble{position:relative;padding:var(--fhb-pad-y,10px) var(--fhb-pad-x,14px);border-radius:14px;background:var(--fhb-bo-bg);color:var(--fhb-bo-tx);border:1px solid var(--fhb-bo-br);box-shadow:var(--fhb-shadow);transition:var(--fhb-trans);font-size:var(--fhb-font-size,14.5px);line-height:var(--fhb-line-height,1.65);word-break:break-word;max-width:100%;}
 .fhb-msg.fhb-k-char .fhb-bubble{border-radius:var(--fhb-c-radius,14px);}
 .fhb-user .fhb-bubble{background:var(--fhb-u-bg,var(--fhb-bu-bg));color:var(--fhb-u-tx,var(--fhb-bu-tx));border-color:var(--fhb-u-bd,transparent);border-style:var(--fhb-u-bs,solid);border-width:var(--fhb-u-bw,1px);border-radius:var(--fhb-u-radius,14px);border-image:var(--fhb-u-bi,none);}
 .fhb-bubble-wrap:hover{transform:translateY(-2px);}
@@ -2413,15 +2498,20 @@ stream_mode = defer`;
 .fhb-burst{position:absolute;left:50%;top:50%;width:80px;height:80px;margin:-40px 0 0 -40px;border-radius:50%;border:2px solid #ffd98a;pointer-events:none;animation:fhbBurst .6s ease-out forwards;}
 .fhb-rp.fhb-deny{animation:fhbDeny .35s ease;}
 .fhb-fig{margin:0;min-width:min(230px,70%);}
+.fhb-imgframe{position:relative;}
 .fhb-imgwrap{position:relative;border-radius:12px;overflow:hidden;border:1px solid var(--fhb-bo-br);box-shadow:var(--fhb-shadow);min-height:110px;}
 .fhb-img{display:block;width:100%;height:auto;max-width:100%;}
 .fhb-imgfb{position:absolute;inset:0;display:flex;flex-direction:column;gap:8px;align-items:center;justify-content:center;background:var(--fhb-accent-soft);color:var(--fhb-accent);font-size:12px;letter-spacing:.14em;}
 .fhb-imgfb-ic svg{width:26px;height:26px;}
+.fhb-imgfb.is-failed{padding:16px;text-align:center;line-height:1.7;overflow-wrap:anywhere;}
+.fhb-imgfb.is-failed .fhb-imgfb-ic{display:none;}
 .fhb-fig figcaption{font-size:12px;color:var(--fhb-meta);margin-top:6px;line-height:1.5;display:flex;flex-wrap:wrap;gap:6px;align-items:baseline;}
 .fhb-kw{font-size:10px;letter-spacing:.2em;text-transform:uppercase;color:var(--fhb-accent2);}
+.fhb-image-text{display:flex;flex-direction:column;gap:6px;}
 .fhb-msg .fhb-bubble.fhb-sticker{background:transparent;border:none;box-shadow:none;padding:2px 6px;color:var(--fhb-ink);display:flex;flex-direction:column;gap:4px;align-items:flex-start;}
 .fhb-user .fhb-bubble.fhb-sticker{align-items:flex-end;}
 .fhb-sticker:hover{transform:translateY(-2px) rotate(-1.5deg);}
+.fhb-sticker-frame{position:relative;display:block;width:fit-content;max-width:100%;line-height:0;}
 .fhb-stk-img{display:block;width:var(--fhb-stk-w,clamp(96px,28vw,138px));height:auto;max-width:100%;border-radius:14px;border:1px solid var(--fhb-hairline);background:var(--fhb-accent-soft);box-shadow:0 8px 18px rgba(0,0,0,.26);transition:var(--fhb-trans);}
 .fhb-sticker:hover .fhb-stk-img{box-shadow:0 12px 26px rgba(0,0,0,.34);border-color:var(--fhb-accent2);}
 .fhb-emo{font-size:clamp(38px,9vw,54px);line-height:1.15;display:inline-block;animation:fhbPop .5s cubic-bezier(.34,1.56,.64,1) both;filter:drop-shadow(0 6px 10px rgba(0,0,0,.2));}
@@ -2438,10 +2528,11 @@ stream_mode = defer`;
 .fhb-pulse{transform-box:fill-box;transform-origin:center;animation:fhbPulse 2s ease-out infinite;}
 .fhb-loc-name{font-family:var(--fhb-serif);font-size:16px;font-weight:700;border-bottom:1px dashed var(--fhb-accent2);display:inline-block;padding-bottom:1px;width:fit-content;}
 .fhb-loc-area{font-size:11px;color:var(--fhb-meta);letter-spacing:.08em;margin-top:3px;}
-.fhb-file{display:flex;align-items:center;gap:12px;min-width:190px;}
+.fhb-file{display:flex;align-items:center;gap:12px;min-width:190px;max-width:100%;}
 .fhb-fileic{width:36px;height:36px;border-radius:10px;background:var(--fhb-hairline);color:var(--fhb-ink);display:flex;align-items:center;justify-content:center;flex:none;}
 .fhb-fileic svg{width:15px;height:15px;}
-.fhb-file-name{font-size:13.5px;font-weight:600;max-width:190px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.fhb-file-col{min-width:0;flex:1;}
+.fhb-file-name{font-size:13.5px;font-weight:600;max-width:100%;overflow-wrap:anywhere;word-break:break-word;white-space:normal;}
 .fhb-file-sub{font-size:11px;color:var(--fhb-meta);margin-top:1px;}
 .fhb-sys{display:flex;align-items:center;justify-content:center;gap:12px;margin:16px 8px;opacity:0;animation:fhbIn .4s ease forwards;font-family:var(--fhb-sans);}
 .fhb-sys::before,.fhb-sys::after{content:'';flex:1;max-width:120px;background:linear-gradient(90deg,transparent,var(--fhb-hairline),transparent);height:1px;}
@@ -2452,8 +2543,9 @@ stream_mode = defer`;
 .fhb-dots circle{fill:currentColor;animation:fhbDot 1.2s ease-in-out infinite;}
 .fhb-dots circle:nth-child(2){animation-delay:.18s;}
 .fhb-dots circle:nth-child(3){animation-delay:.36s;}
-.fhb-thread{margin:18px auto;border:1px solid var(--fhb-accent2);border-top:2px solid var(--fhb-accent);border-radius:16px;overflow:hidden;background:var(--fhb-card-bg);box-shadow:var(--fhb-card-shadow);opacity:0;animation:fhbIn .5s ease forwards;font-family:var(--fhb-sans);color:var(--fhb-ink);max-width:min(92%,520px);}
-.fhb-th-head{display:flex;align-items:center;gap:10px;width:100%;text-align:left;appearance:none;background:var(--fhb-card-head);border:none;border-bottom:1px dashed var(--fhb-hairline);padding:11px 14px;cursor:pointer;color:var(--fhb-ink);font:inherit;transition:var(--fhb-trans);}
+.fhb-thread{position:relative;margin:18px auto;border:1px solid var(--fhb-accent2);border-top:2px solid var(--fhb-accent);border-radius:16px;overflow:hidden;background:var(--fhb-card-bg);box-shadow:var(--fhb-card-shadow);opacity:0;animation:fhbIn .5s ease forwards;font-family:var(--fhb-sans);color:var(--fhb-ink);max-width:min(92%,520px);}
+.fhb-th-head{position:relative;display:flex;align-items:center;gap:10px;width:100%;text-align:left;appearance:none;background:var(--fhb-card-head);border:none;border-bottom:1px dashed var(--fhb-hairline);border-radius:14px 14px 0 0;padding:11px 78px 11px 14px;cursor:pointer;color:var(--fhb-ink);font:inherit;transition:var(--fhb-trans);}
+.fhb-thread:not(.open) .fhb-th-head{border-radius:14px;}
 .fhb-th-head:hover{background:var(--fhb-card-head-h);}
 .fhb-th-head:active{transform:scale(.995);}
 .fhb-th-icon{width:26px;height:26px;border-radius:8px;background:var(--fhb-accent);color:#fff;display:flex;align-items:center;justify-content:center;flex:none;box-shadow:0 0 10px var(--fhb-accent-soft);}
@@ -2462,15 +2554,31 @@ stream_mode = defer`;
 .fhb-th-title{font-family:var(--fhb-serif);font-size:13.5px;letter-spacing:.05em;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
 .fhb-th-peek{font-size:11px;color:var(--fhb-meta);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:2px;font-style:italic;}
 .fhb-thread.open .fhb-th-peek{display:none;}
-.fhb-th-count{flex:none;font-size:10px;letter-spacing:.14em;color:var(--fhb-accent2);border:1px solid var(--fhb-accent2);border-radius:999px;padding:2px 8px;font-variant-numeric:tabular-nums;}
-.fhb-th-toggle{flex:none;font-size:11px;letter-spacing:.18em;color:var(--fhb-meta);display:flex;align-items:center;gap:5px;}
+.fhb-th-actions{position:absolute;top:50%;right:14px;z-index:5;display:flex;align-items:center;transform:translateY(-50%);}
+.fhb-th-toggle{display:flex;align-items:center;justify-content:center;gap:5px;width:auto;height:auto;border:0;background:transparent;color:var(--fhb-meta);font-size:11px;letter-spacing:.12em;white-space:nowrap;}
+.fhb-th-tx{display:inline;}
 .fhb-th-caret{width:10px;height:6px;transition:transform .3s ease;}
 .fhb-thread.open .fhb-th-caret{transform:rotate(180deg);}
 .fhb-thread-body{display:grid;grid-template-rows:0fr;transition:grid-template-rows .45s cubic-bezier(.22,.61,.36,1);}
 .fhb-thread.open .fhb-thread-body{grid-template-rows:1fr;}
-.fhb-thread-inner{overflow:hidden;min-height:0;padding:4px 12px 8px;}
+.fhb-thread-inner{overflow:hidden;min-height:0;padding:0 12px;}
+.fhb-thread.open .fhb-thread-inner{padding:4px 12px 8px;}
 .fhb-thread-inner > .fhb-msg{margin:12px 2px;}
 .fhb-thread-inner > .fhb-sys{margin:8px 4px;}
+@media(max-width:480px){
+.fhb-th-head{position:relative;display:grid;grid-template-columns:26px minmax(0,1fr);align-items:center;gap:10px;padding:10px 74px 10px 12px;}
+.fhb-th-icon{grid-column:1;grid-row:1;}
+.fhb-th-main{grid-column:2;grid-row:1;}
+.fhb-th-title{white-space:normal;overflow:visible;text-overflow:clip;overflow-wrap:anywhere;line-height:1.45;}
+.fhb-th-actions{position:absolute;grid-column:auto;grid-row:auto;top:50%;right:12px;display:flex;align-items:center;transform:translateY(-50%);margin:0;}
+.fhb-th-toggle{width:auto;height:auto;justify-content:center;gap:5px;border:0;border-radius:0;background:transparent;color:var(--fhb-meta);}
+.fhb-th-caret{width:9px;height:5px;}
+.fhb-sys{flex-wrap:wrap;gap:6px 8px;}
+.fhb-sys::before,.fhb-sys::after{display:none;}
+.fhb-sys-cap{flex:1 1 100%;max-width:100%;white-space:normal;text-align:center;overflow-wrap:anywhere;}
+.fhb-sys-time{flex:1 1 100%;width:100%;text-align:center;white-space:nowrap;}
+.fhb-file{min-width:0;width:100%;}
+}
 @keyframes fhbIn{from{opacity:0;transform:translateY(10px) scale(.98);}to{opacity:1;transform:translateY(0) scale(1);}}
 @keyframes fhbWave{0%,100%{transform:scaleY(.35);}50%{transform:scaleY(1);}}
 @keyframes fhbDot{0%,100%{transform:translateY(0);opacity:.5;}50%{transform:translateY(-3px);opacity:1;}}

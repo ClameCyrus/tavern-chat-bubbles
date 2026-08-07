@@ -1,16 +1,18 @@
 // ============================================================
-// 芙林_聊天气泡_专属版 v12
-// 变更：用户名替换在气泡渲染后自动补应用；消息编辑完成后可靠重渲染；用户气泡内文字左对齐
+// 芙林_聊天气泡_专属版 v14
+// v14：同步通用版 v15.5 的尺寸配置、移动端修复、媒体装饰锚点、image 开关与折叠卡片（不含可视化面板）
+// v13：确认角色主世界书已导入后才查找和注入，不扫描其它世界书
+// v12：用户名替换在气泡渲染后自动补应用；消息编辑完成后可靠重渲染；用户气泡内文字左对齐
 // v11：角标跟随气泡、短句自适应收缩、头像悬浮放大与透明头像回退修复
-// 功能基线：通用版 v14.7 的单书相关部分（不含跨世界书去重与缺失条目分书写入）
+// 功能基线：通用版 v15.5（保留芙林专属皮肤与单世界书逻辑，不含外观配置可视化面板）
 // 皮肤：芙林专属玫瑰藤蔓框、丝绒金线气泡、玫瑰水印、火漆水印、名字玫瑰标记、红金调色
-// 注入：单卡单书直写，无群聊闸门、无文件探测、不创建聊天书、不跨卡
+// 注入：只读写当前角色的主世界书，不创建或扫描其它世界书
 // ============================================================
 const FHB_STYLE_ID = 'fhb-style-flynn';
 const FHB_MESSAGE_RENDERED_EVENT = 'fhb_message_rendered';
 
 function initFlynnChatBubbles() {
-  const CONF_VERSION = 'v15';
+  const CONF_VERSION = 'v15.5';
 
   const CONFIG = {
     // —— 以下带 * 的项均可被世界书「外观配置」条目覆盖，注释掉即回退到此处默认 ——
@@ -34,8 +36,21 @@ function initFlynnChatBubbles() {
     DECO_SIZE: '', // * 装饰宽度
     DECO_OFFSET: '', // * 装饰外移比例 -100~100
     BUBBLE: {}, // * bubble.<user|char|npc>.<bg|tx|bd|bs|bw>
+    LAYOUT: { // * 气泡整体尺寸与排版
+      scale: 1,
+      fontSize: 14.5,
+      lineHeight: 1.65,
+      paddingX: 14,
+      paddingY: 10,
+      maxWidthPercent: 72,
+      maxWidthPx: 480,
+      avatarSize: 40,
+      gap: 11,
+      spacing: 14,
+    },
 
     STICKER_SIZE: '', // *
+    IMAGE_AUTO_GENERATE: true, // * image 类型是否自动请求随机图片
     theme: 'auto', // *
     imgW: 640, // *
     imgH: 400, // *
@@ -87,7 +102,9 @@ function initFlynnChatBubbles() {
     'DECO_SIZE',
     'DECO_OFFSET',
     'BUBBLE',
+    'LAYOUT',
     'STICKER_SIZE',
+    'IMAGE_AUTO_GENERATE',
     'theme',
     'imgW',
     'imgH',
@@ -104,6 +121,15 @@ function initFlynnChatBubbles() {
       const v = FACTORY[k];
       CONFIG[k] = v && typeof v === 'object' ? JSON.parse(JSON.stringify(v)) : v;
     });
+  }
+
+  // 进入有聊天但无可用世界书的场景时，清掉上一张卡遗留的运行时配置。
+  function wipeRuntimeConfig() {
+    resetConfigurables();
+    STK.map = Object.assign({}, CONFIG.STICKER_MAP || {});
+    STK.book = '';
+    STK.loaded = false;
+    STK.confVer = '';
   }
 
   let PW = window;
@@ -518,7 +544,11 @@ function initFlynnChatBubbles() {
       }
       col.querySelectorAll('.fhb-deco').forEach(n => n.remove());
       const html = decoHTML(m.dataset.kind);
-      if (html) wrap.insertAdjacentHTML('beforeend', html);
+      const imageFrame = wrap.querySelector(':scope > .fhb-fig > .fhb-imgframe');
+      const voiceBubble = wrap.querySelector(':scope > .fhb-voice');
+      const stickerFrame = wrap.querySelector(':scope > .fhb-sticker > .fhb-sticker-frame');
+      const target = imageFrame || voiceBubble || stickerFrame || wrap;
+      if (html) target.insertAdjacentHTML('beforeend', html);
     });
   }
 
@@ -677,6 +707,7 @@ accent2_light = #a07c22
 #                  double 双线 / groove 凹槽 / ridge 凸边 / none 无边 /
 #                  slash 45度斜纹（注意：斜纹会让气泡圆角失效）
 #     border_width 边框粗细，如 1px、1.5px、2px
+#     border_radius 气泡圆角，如 14px；填 0 为直角
 # 芙林气泡左边的红色饰线是专属造型，保持固定，其余边都可自定义。
 # 示例（删掉 # 才生效）：
 
@@ -685,10 +716,40 @@ accent2_light = #a07c22
 # bubble.user.border_style = dashed
 # bubble.char.background = #2e161b
 # bubble.char.text = #f0e9d9
+# bubble.char.border_radius = 12px
 # bubble.npc.border_style = dotted
 
 # ------------------------------------------------------------
-# 四、气泡四角装饰图
+# 四、气泡尺寸与排版
+# ------------------------------------------------------------
+# 整体缩放（0.5~2）：1 = 原始大小，0.9 = 缩小到 90%，1.1 = 放大到 110%。
+message_scale = 1
+
+# 气泡文字大小（8~40，不带单位，按 px 处理）。
+bubble_font_size = 14.5
+
+# 文字行高（1~3，是字号的倍数，不是 px）。
+bubble_line_height = 1.65
+
+# 气泡左右、上下内边距（0~48，不带单位，按 px 处理）。
+bubble_padding_x = 14
+bubble_padding_y = 10
+
+# 普通气泡最大宽度同时受百分比（30~100）和像素上限（160~1200）约束，取较小值。
+bubble_max_width_percent = 72
+bubble_max_width_px = 480
+
+# 头像尺寸（20~120px）；芙林的玫瑰藤蔓框会一起缩放。
+avatar_size = 40
+
+# 同一条消息中头像与气泡的横向间距（0~48px）。
+message_gap = 11
+
+# 上下两条消息之间的间距（0~80px）。
+message_spacing = 14
+
+# ------------------------------------------------------------
+# 五、气泡四角装饰图
 # ------------------------------------------------------------
 # 在气泡的四个角挂小图或 gif（比如玫瑰、缎带、贴纸），不挡点击。
 # 键名格式：deco.谁.角位
@@ -712,13 +773,16 @@ accent2_light = #a07c22
 # deco_offset = 40
 
 # ------------------------------------------------------------
-# 五、其它
+# 六、其它
 # ------------------------------------------------------------
 # 配色跟随：auto 自动判断你的酒馆是深色还是浅色 / dark 强制深色 / light 强制浅色
 theme = auto
 
 # 表情包图片宽度，留空为自适应。填法：120px
 sticker_size =
+
+# image 类型是否自动联网生成随机图片。关闭后不发起取图请求，只显示描述和关键词。
+image_auto_generate = true
 
 # image 类型随机配图的尺寸，宽x高
 image_size = 640x400
@@ -824,25 +888,42 @@ stream_mode = defer`;
     return String((e && (e.name != null ? e.name : e.comment)) || '').trim();
   }
 
-  // ---------- 解析角色绑定的世界书名（单卡单书，不做存在性探测，不做聊天书兜底） ----------
+  // ---------- 闸门一：是否存在活动角色聊天 ----------
+  function hasActiveChat() {
+    try {
+      const st = PW.SillyTavern;
+      const c = st && typeof st.getContext === 'function' ? st.getContext() : null;
+      if (c) {
+        const gid = c.groupId;
+        if (gid !== undefined && gid !== null && String(gid) !== '') return true;
+        const cid = c.characterId;
+        if (cid === undefined || cid === null || String(cid) === '') return false;
+        return true;
+      }
+    } catch (e) {}
+    try {
+      if (typeof getCurrentChatId === 'function') {
+        const id = getCurrentChatId();
+        if (id) return true;
+      }
+    } catch (e) {}
+    try {
+      return !!PD.querySelector('#chat .mes');
+    } catch (e) {
+      return false;
+    }
+  }
+
+  // ---------- 闸门二：解析角色绑定世界书名（不创建任何文件） ----------
   async function resolveBookName() {
     if (CONFIG.WI_TARGET && CONFIG.WI_TARGET.trim()) return CONFIG.WI_TARGET.trim();
 
     if (typeof getCharWorldbookNames === 'function') {
-      const tries = [
-        () => getCharWorldbookNames('current'),
-        () => getCharWorldbookNames({ type: 'all' }),
-        () => getCharWorldbookNames(),
-      ];
-      for (const fn of tries) {
-        try {
-          const r = await fn();
-          if (!r) continue;
-          if (typeof r === 'string' && r.trim()) return r.trim();
-          if (r.primary && String(r.primary).trim()) return String(r.primary).trim();
-          if (Array.isArray(r.additional) && r.additional.length) return String(r.additional[0]).trim();
-        } catch (e) {}
-      }
+      try {
+        const r = await getCharWorldbookNames('current');
+        if (typeof r === 'string' && r.trim()) return r.trim();
+        if (r && r.primary && String(r.primary).trim()) return String(r.primary).trim();
+      } catch (e) {}
     } else if (typeof getCharLorebooks === 'function') {
       try {
         const r = await getCharLorebooks('current');
@@ -858,6 +939,34 @@ stream_mode = defer`;
       } catch (e) {}
     }
     return '';
+  }
+
+  // ---------- 闸门三：绑定书名对应的世界书文件已经成功导入 ----------
+  // 返回 yes/no/unknown；自动注入在 unknown 时保守跳过，手动注入仍允许旧环境继续尝试。
+  async function bookState(name) {
+    if (!name) return 'no';
+    try {
+      if (typeof getWorldbookNames === 'function') {
+        const list = await getWorldbookNames();
+        if (Array.isArray(list)) return list.includes(name) ? 'yes' : 'no';
+      }
+    } catch (e) {}
+    try {
+      if (typeof getLorebookNames === 'function') {
+        const list = await getLorebookNames();
+        if (Array.isArray(list)) return list.includes(name) ? 'yes' : 'no';
+      }
+    } catch (e) {}
+    try {
+      if (Array.isArray(PW.world_names)) return PW.world_names.includes(name) ? 'yes' : 'no';
+    } catch (e) {}
+    const list = await listEntries(name);
+    if (list !== null) return 'yes';
+    return API.read || API.getEntries ? 'no' : 'unknown';
+  }
+
+  async function worldbookExists(name) {
+    return (await bookState(name)) !== 'no';
   }
 
   async function listEntries(book) {
@@ -1306,12 +1415,37 @@ stream_mode = defer`;
     border_width: 'bw',
     width: 'bw',
     bw: 'bw',
+    border_radius: 'ra',
+    radius: 'ra',
+    br: 'ra',
+  };
+  const LAYOUT_KEY_MAP = {
+    message_scale: ['scale', 0.5, 2],
+    bubble_font_size: ['fontSize', 8, 40],
+    bubble_line_height: ['lineHeight', 1, 3],
+    bubble_padding_x: ['paddingX', 0, 48],
+    bubble_padding_y: ['paddingY', 0, 48],
+    bubble_max_width_percent: ['maxWidthPercent', 30, 100],
+    bubble_max_width_px: ['maxWidthPx', 160, 1200],
+    avatar_size: ['avatarSize', 20, 120],
+    message_gap: ['gap', 0, 48],
+    message_spacing: ['spacing', 0, 80],
   };
 
   function normWidth(v) {
     v = String(v || '').trim();
     if (/^\d+(\.\d+)?$/.test(v)) return v + 'px';
     if (/^\d+(\.\d+)?(px|em|rem)$/.test(v)) return v;
+    return '';
+  }
+
+  function normRadius(v) {
+    v = String(v || '').trim();
+    if (v === '0') return '0';
+    if (/^\d+(\.\d+)?$/.test(v)) return v + 'px';
+    try {
+      if (PW.CSS && PW.CSS.supports && PW.CSS.supports('border-radius', v)) return v;
+    } catch (e) {}
     return '';
   }
 
@@ -1356,6 +1490,11 @@ stream_mode = defer`;
             if (w) CONFIG.BUBBLE[seg[0]][key] = w;
             return;
           }
+          if (key === 'ra') {
+            const radius = normRadius(v);
+            if (radius) CONFIG.BUBBLE[seg[0]][key] = radius;
+            return;
+          }
           CONFIG.BUBBLE[seg[0]][key] = v;
         }
         return;
@@ -1380,10 +1519,24 @@ stream_mode = defer`;
         if (name && v) CONFIG.NPC_AVATARS[name] = v;
         return;
       }
+
+      if (kl === 'image_auto_generate') {
+        const t = v.toLowerCase();
+        if (['true', '1', 'yes', 'on', '是', '开启'].includes(t)) CONFIG.IMAGE_AUTO_GENERATE = true;
+        if (['false', '0', 'no', 'off', '否', '关闭'].includes(t)) CONFIG.IMAGE_AUTO_GENERATE = false;
+        return;
+      }
       if (!v) return;
 
       if (simple[kl]) {
         CONFIG[simple[kl]] = v;
+        return;
+      }
+
+      if (LAYOUT_KEY_MAP[kl]) {
+        const [key, min, max] = LAYOUT_KEY_MAP[kl];
+        const n = parseFloat(v);
+        if (!isNaN(n)) CONFIG.LAYOUT[key] = Math.max(min, Math.min(max, n));
         return;
       }
 
@@ -1427,22 +1580,41 @@ stream_mode = defer`;
     });
   }
 
-  // ---------- 主注入流程（单卡单书直写） ----------
+  // ---------- 主注入流程（活动聊天 / 绑定书名 / 文件已导入三道闸门） ----------
   async function bootstrapWorldInfo(manual) {
     if (STK.busy) return;
     STK.busy = true;
     let wrote = false;
     let failed = false;
     try {
-      const book = await resolveBookName();
+      if (!hasActiveChat()) {
+        if (manual) toastMsg('当前没有打开的聊天，请先进入芙林的聊天再注入。', 'warning');
+        return;
+      }
+
+      let book = await resolveBookName();
+      if (book) {
+        const state = await bookState(book);
+        if (state === 'no') {
+          console.info(`[聊天气泡] 绑定世界书「${book}」的文件不存在（可能尚未导入），本次自动注入已跳过。`);
+          book = '';
+        } else if (state === 'unknown' && !manual) {
+          console.info(
+            `[聊天气泡] 无法确认世界书「${book}」是否已导入，自动注入已保守跳过。可手动点击「注入/更新世界书」。`,
+          );
+          book = '';
+        }
+      }
+
       if (!book) {
+        wipeRuntimeConfig();
         if (manual) toastMsg('未检测到芙林绑定的世界书，请先在世界书面板完成绑定后再试。', 'warning');
         return;
       }
 
       STK.book = book;
-      const report = [];
       resetConfigurables();
+      const report = [];
 
       // 1. 外观配置：只创建不覆盖，创建后立即读回应用
       if (CONFIG.INJECT_CONFIG_WI) {
@@ -1454,7 +1626,7 @@ stream_mode = defer`;
         const confText = await readEntryContent(book, SPEC.conf.title);
         if (confText != null) {
           applyConfigKV(parseKV(confText));
-          const vm = confText.match(/模板版本\s*(v\d+)/);
+          const vm = confText.match(/模板版本\s*(v\d+(?:\.\d+)*)/i);
           STK.confVer = vm ? vm[1] : '';
           if (confRes !== 'created' && STK.confVer !== CONF_VERSION && manual) {
             toastMsg(`外观配置条目为旧模板（${STK.confVer || '未标注'}）。需要新注释可点「重置外观配置」。`, 'info');
@@ -1587,16 +1759,30 @@ stream_mode = defer`;
       }
 
       case 'image': {
+        const rawKeywords = (extra || '')
+          .split(/[,，]/)
+          .map(k => stripTags(k).trim())
+          .filter(Boolean)
+          .join(' · ');
+        if (!CONFIG.IMAGE_AUTO_GENERATE) {
+          return `<div class="fhb-bubble fhb-image-text">
+                    ${content ? `<span class="fhb-image-desc">${content}</span>` : ''}
+                    ${rawKeywords ? `<span class="fhb-kw">${escapeHTML(rawKeywords)}</span>` : ''}
+                </div>`;
+        }
         const kws = (extra || '')
           .split(/[,，]/)
           .map(k => k.replace(/[^a-zA-Z0-9 -]/g, '').trim())
           .filter(Boolean)
           .join(',');
+        const kwLabel = kws ? kws.replace(/,/g, ' · ') : content || '暂无图片关键词';
         const url = `https://loremflickr.com/${CONFIG.imgW}/${CONFIG.imgH}/${kws || 'night,bar'}/all`;
         return `<figure class="fhb-fig">
-                    <div class="fhb-imgwrap">
-                        <div class="fhb-imgfb"><span class="fhb-imgfb-ic">${ICON.imgph}</span><span class="fhb-imgfb-tx">影像载入中</span></div>
-                        <img class="fhb-img" src="${url}" alt="${escapeAttr(content)}" loading="lazy" onload="this.previousElementSibling.style.display='none'" onerror="this.style.display='none';var f=this.previousElementSibling;f.style.display='flex';f.querySelector('.fhb-imgfb-tx').textContent='影像未能送达';">
+                    <div class="fhb-imgframe">
+                        <div class="fhb-imgwrap">
+                            <div class="fhb-imgfb" data-fallback="${escapeAttr(kwLabel)}"><span class="fhb-imgfb-ic">${ICON.imgph}</span><span class="fhb-imgfb-tx">影像载入中</span></div>
+                            <img class="fhb-img" src="${url}" alt="${escapeAttr(content)}" loading="lazy" onload="this.previousElementSibling.style.display='none'" onerror="this.style.display='none';var f=this.previousElementSibling;f.style.display='flex';f.classList.add('is-failed');f.querySelector('.fhb-imgfb-tx').textContent=f.dataset.fallback||'暂无图片关键词';">
+                        </div>
                     </div>
                     <figcaption>${content}${kws ? `<span class="fhb-kw">${kws.replace(/,/g, ' · ')}</span>` : ''}</figcaption>
                 </figure>`;
@@ -1615,7 +1801,7 @@ stream_mode = defer`;
           ? `<img class="fhb-stk-img" src="${escapeAttr(src)}" alt="${attrRaw(key)}" loading="lazy" onerror="${STK_FALLBACK}">`
           : '';
         return `<div class="fhb-bubble fhb-sticker" data-stk="${attrRaw(key)}">
-                    ${img}<span class="${txtCls}"${hide}>${raw}</span>
+                    <span class="fhb-sticker-frame">${img}<span class="${txtCls}"${hide}>${raw}</span></span>
                     ${extra ? `<div class="fhb-sticker-cap">${extra}</div>` : ''}
                 </div>`;
       }
@@ -1901,7 +2087,8 @@ stream_mode = defer`;
 
   function refreshThreadCard(wrap) {
     const msgs = Array.from(wrap.querySelectorAll('.fhb-thmsg'));
-    const count = wrap.querySelectorAll('.fhb-thmsg, .fhb-sys').length;
+    const legacyCount = wrap.querySelector('.fhb-th-count');
+    if (legacyCount) legacyCount.remove();
 
     const last = msgs[msgs.length - 1];
     const bub = last && (last.querySelector('.fhb-bubble') || last.querySelector('figcaption'));
@@ -1910,10 +2097,8 @@ stream_mode = defer`;
 
     const titleEl = wrap.querySelector('.fhb-th-title');
     const peekEl = wrap.querySelector('.fhb-th-peek');
-    const countEl = wrap.querySelector('.fhb-th-count');
     if (titleEl) titleEl.textContent = threadTitle(msgs);
     if (peekEl) peekEl.textContent = '最近 · ' + peek;
-    if (countEl) countEl.textContent = count + ' 条';
   }
 
   function bindThreadHead(wrap) {
@@ -1960,8 +2145,9 @@ stream_mode = defer`;
                         <span class="fhb-th-title"></span>
                         <span class="fhb-th-peek"></span>
                     </span>
-                    <span class="fhb-th-count"></span>
-                    <span class="fhb-th-toggle"><span class="fhb-th-tx">展开</span><svg class="fhb-th-caret" viewBox="0 0 10 6" aria-hidden="true"><path d="M1 1l4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg></span>
+                    <span class="fhb-th-actions">
+                        <span class="fhb-th-toggle"><span class="fhb-th-tx">展开</span><svg class="fhb-th-caret" viewBox="0 0 10 6" aria-hidden="true"><path d="M1 1l4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg></span>
+                    </span>
                 </button>
                 <div class="fhb-thread-body"><div class="fhb-thread-inner"></div></div>`;
       textEl.insertBefore(wrap, run[0]);
@@ -2242,6 +2428,7 @@ stream_mode = defer`;
         }
       }
       if (b.bw) s += `--fhb-${k}-bw:${b.bw};`;
+      if (b.ra) s += `--fhb-${k}-radius:${b.ra};`;
     }
     if (CONFIG.DECO_SIZE && String(CONFIG.DECO_SIZE).trim()) {
       s += `--fhb-deco-w:${normWidth(CONFIG.DECO_SIZE) || String(CONFIG.DECO_SIZE).trim()};`;
@@ -2249,6 +2436,11 @@ stream_mode = defer`;
     if (CONFIG.DECO_OFFSET !== '' && CONFIG.DECO_OFFSET != null && !isNaN(parseFloat(CONFIG.DECO_OFFSET))) {
       s += `--fhb-deco-o:${parseFloat(CONFIG.DECO_OFFSET)}%;`;
     }
+    const l = CONFIG.LAYOUT || {};
+    s += `--fhb-scale:${l.scale};--fhb-font-size:${l.fontSize}px;--fhb-line-height:${l.lineHeight};`;
+    s += `--fhb-pad-x:${l.paddingX}px;--fhb-pad-y:${l.paddingY}px;`;
+    s += `--fhb-max-w-percent:${l.maxWidthPercent}%;--fhb-max-w-px:${l.maxWidthPx}px;`;
+    s += `--fhb-avatar-size:${l.avatarSize}px;--fhb-msg-gap:${l.gap}px;--fhb-msg-spacing:${l.spacing}px;`;
     return s;
   }
 
@@ -2258,12 +2450,12 @@ stream_mode = defer`;
 
   function buildCSS(p) {
     return `
-.fhb-msg,.fhb-sys,.fhb-thread{${tokenCSS(p)}--fhb-serif:Didot,'Bodoni MT','Playfair Display','Songti SC','STSong',Georgia,serif;--fhb-sans:'Helvetica Neue','Avenir Next',Arial,'PingFang SC','Microsoft YaHei',sans-serif;--fhb-trans:all .28s cubic-bezier(.22,.61,.36,1);}
-.fhb-msg{display:flex;align-items:flex-start;gap:11px;margin:14px 2px;opacity:0;animation:fhbIn .5s ease forwards;font-family:var(--fhb-sans);color:var(--fhb-ink);max-width:100%;}
+.fhb-msg,.fhb-sys,.fhb-thread{${tokenCSS(p)}--fhb-serif:Didot,'Bodoni MT','Playfair Display','Songti SC','STSong',Georgia,serif;--fhb-sans:'Helvetica Neue','Avenir Next',Arial,'PingFang SC','Microsoft YaHei',sans-serif;--fhb-trans:all .28s cubic-bezier(.22,.61,.36,1);zoom:var(--fhb-scale,1);}
+.fhb-msg{display:flex;align-items:flex-start;gap:var(--fhb-msg-gap,11px);margin:var(--fhb-msg-spacing,14px) 2px;opacity:0;animation:fhbIn .5s ease forwards;font-family:var(--fhb-sans);color:var(--fhb-ink);max-width:100%;}
 .fhb-msg.fhb-user{flex-direction:row-reverse;}
 [data-fhb-noanim="1"] .fhb-msg,[data-fhb-noanim="1"] .fhb-sys,[data-fhb-noanim="1"] .fhb-thread{animation:none!important;opacity:1!important;}
 [data-fhb-noanim="1"] .fhb-bubble,[data-fhb-noanim="1"] .fhb-bubble-wrap{transition:none!important;}
-.fhb-avwrap{position:relative;width:40px;height:40px;flex:none;}
+.fhb-avwrap{position:relative;width:var(--fhb-avatar-size,40px);height:var(--fhb-avatar-size,40px);flex:none;}
 .fhb-avatar{position:absolute;inset:0;width:100%;height:100%;border-radius:50%;overflow:hidden;border:1.5px solid var(--fhb-gold);box-shadow:0 3px 10px rgba(0,0,0,.25);z-index:2;transform:scale(1);transform-origin:left top;transition:transform .3s cubic-bezier(.22,.61,.36,1),box-shadow .3s ease;transition-delay:0s;}
 .fhb-user .fhb-avatar{transform-origin:right top;}
 .fhb-avwrap:hover{z-index:30;}
@@ -2286,7 +2478,7 @@ stream_mode = defer`;
 .fhb-rose-swirl{fill:none;stroke:var(--fhb-rose-deep);stroke-width:.9;stroke-linecap:round;opacity:.85;}
 .fhb-rose-sepal{stroke:var(--fhb-leaf);stroke-width:1;stroke-linecap:round;}
 .fhb-rose{transform-box:fill-box;transform-origin:center;}
-.fhb-col{position:relative;display:flex;flex-direction:column;align-items:flex-start;gap:4px;max-width:min(72%,480px);min-width:0;}
+.fhb-col{position:relative;display:flex;flex-direction:column;align-items:flex-start;gap:4px;max-width:min(var(--fhb-max-w-percent,72%),var(--fhb-max-w-px,480px));min-width:0;}
 .fhb-col-wide{max-width:min(86%,440px);}
 .fhb-user .fhb-col{align-items:flex-end;text-align:left;}
 .fhb-bubble-wrap{position:relative;display:block;width:fit-content;max-width:100%;transition:transform .28s cubic-bezier(.22,.61,.36,1);}
@@ -2299,8 +2491,9 @@ stream_mode = defer`;
 /* 【芙林专属】名字前的玫瑰标记 */
 .fhb-charmark{width:12px;height:12px;flex:none;align-self:center;color:var(--fhb-red);filter:drop-shadow(0 0 4px var(--fhb-char-glow));animation:fhbMarkBeat 3.4s ease-in-out infinite;}
 .fhb-charmark svg{width:100%;height:100%;display:block;}
-.fhb-bubble{position:relative;padding:10px 14px;border-radius:14px;background:var(--fhb-bo-bg);color:var(--fhb-bo-tx);border:1px solid var(--fhb-bo-br);box-shadow:var(--fhb-shadow);transition:var(--fhb-trans);font-size:14.5px;line-height:1.65;word-break:break-word;max-width:100%;}
-.fhb-user .fhb-bubble{background:var(--fhb-u-bg,var(--fhb-bu-bg));color:var(--fhb-u-tx,var(--fhb-bu-tx));border-color:var(--fhb-u-bd,transparent);}
+.fhb-bubble{position:relative;padding:var(--fhb-pad-y,10px) var(--fhb-pad-x,14px);border-radius:14px;background:var(--fhb-bo-bg);color:var(--fhb-bo-tx);border:1px solid var(--fhb-bo-br);box-shadow:var(--fhb-shadow);transition:var(--fhb-trans);font-size:var(--fhb-font-size,14.5px);line-height:var(--fhb-line-height,1.65);word-break:break-word;max-width:100%;}
+.fhb-msg.fhb-k-char .fhb-bubble{border-radius:var(--fhb-c-radius,14px);}
+.fhb-user .fhb-bubble{background:var(--fhb-u-bg,var(--fhb-bu-bg));color:var(--fhb-u-tx,var(--fhb-bu-tx));border-color:var(--fhb-u-bd,transparent);border-style:var(--fhb-u-bs,solid);border-width:var(--fhb-u-bw,1px);border-radius:var(--fhb-u-radius,14px);}
 .fhb-bubble-wrap:hover{transform:translateY(-2px);}
 .fhb-other .fhb-bubble:not(.fhb-transfer):not(.fhb-rp):not(.fhb-sticker)::before,.fhb-obs .fhb-bubble:not(.fhb-transfer):not(.fhb-rp):not(.fhb-sticker)::before{content:'';position:absolute;left:-6px;top:15px;border-style:solid;border-width:5px 8px 5px 0;border-color:transparent var(--fhb-n-tail,var(--fhb-bo-bg)) transparent transparent;}
 .fhb-user .fhb-bubble:not(.fhb-sticker):not(.fhb-rp):not(.fhb-transfer)::after{content:'';position:absolute;right:-6px;top:15px;border-style:solid;border-width:5px 0 5px 8px;border-color:transparent transparent transparent var(--fhb-u-tail,var(--fhb-bu-tail));}
@@ -2355,15 +2548,20 @@ stream_mode = defer`;
 .fhb-burst{position:absolute;left:50%;top:50%;width:80px;height:80px;margin:-40px 0 0 -40px;border-radius:50%;border:2px solid #ffd98a;pointer-events:none;animation:fhbBurst .6s ease-out forwards;}
 .fhb-rp.fhb-deny{animation:fhbDeny .35s ease;}
 .fhb-fig{margin:0;min-width:min(230px,70%);}
+.fhb-imgframe{position:relative;}
 .fhb-imgwrap{position:relative;border-radius:12px;overflow:hidden;border:1px solid var(--fhb-bo-br);box-shadow:var(--fhb-shadow);min-height:110px;}
 .fhb-img{display:block;width:100%;height:auto;max-width:100%;}
 .fhb-imgfb{position:absolute;inset:0;display:flex;flex-direction:column;gap:8px;align-items:center;justify-content:center;background:var(--fhb-red-soft);color:var(--fhb-red);font-size:12px;letter-spacing:.14em;}
 .fhb-imgfb-ic svg{width:26px;height:26px;}
+.fhb-imgfb.is-failed{padding:16px;text-align:center;line-height:1.7;overflow-wrap:anywhere;}
+.fhb-imgfb.is-failed .fhb-imgfb-ic{display:none;}
 .fhb-fig figcaption{font-size:12px;color:var(--fhb-meta);margin-top:6px;line-height:1.5;display:flex;flex-wrap:wrap;gap:6px;align-items:baseline;}
 .fhb-kw{font-size:10px;letter-spacing:.2em;text-transform:uppercase;color:var(--fhb-gold);}
+.fhb-image-text{display:flex;flex-direction:column;gap:6px;}
 .fhb-msg .fhb-bubble.fhb-sticker{background:transparent;border:none;box-shadow:none;padding:2px 6px;color:var(--fhb-ink);display:flex;flex-direction:column;gap:4px;align-items:flex-start;}
 .fhb-user .fhb-bubble.fhb-sticker{align-items:flex-end;}
 .fhb-sticker:hover{transform:translateY(-2px) rotate(-1.5deg);}
+.fhb-sticker-frame{position:relative;display:block;width:fit-content;max-width:100%;line-height:0;}
 .fhb-stk-img{display:block;width:var(--fhb-stk-w,clamp(96px,28vw,138px));height:auto;max-width:100%;border-radius:14px;border:1px solid var(--fhb-hairline);background:var(--fhb-red-soft);box-shadow:0 8px 18px rgba(0,0,0,.26);transition:var(--fhb-trans);}
 .fhb-sticker:hover .fhb-stk-img{box-shadow:0 12px 26px rgba(0,0,0,.34);border-color:var(--fhb-gold);}
 .fhb-emo{font-size:clamp(38px,9vw,54px);line-height:1.15;display:inline-block;animation:fhbPop .5s cubic-bezier(.34,1.56,.64,1) both;filter:drop-shadow(0 6px 10px rgba(0,0,0,.2));}
@@ -2380,10 +2578,11 @@ stream_mode = defer`;
 .fhb-pulse{transform-box:fill-box;transform-origin:center;animation:fhbPulse 2s ease-out infinite;}
 .fhb-loc-name{font-family:var(--fhb-serif);font-size:16px;font-weight:700;border-bottom:1px dashed var(--fhb-gold);display:inline-block;padding-bottom:1px;width:fit-content;}
 .fhb-loc-area{font-size:11px;color:var(--fhb-meta);letter-spacing:.08em;margin-top:3px;}
-.fhb-file{display:flex;align-items:center;gap:12px;min-width:190px;}
+.fhb-file{display:flex;align-items:center;gap:12px;min-width:190px;max-width:100%;}
 .fhb-fileic{width:36px;height:36px;border-radius:10px;background:var(--fhb-hairline);color:var(--fhb-ink);display:flex;align-items:center;justify-content:center;flex:none;}
 .fhb-fileic svg{width:15px;height:15px;}
-.fhb-file-name{font-size:13.5px;font-weight:600;max-width:190px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.fhb-file-col{min-width:0;flex:1;}
+.fhb-file-name{font-size:13.5px;font-weight:600;max-width:100%;overflow-wrap:anywhere;word-break:break-word;white-space:normal;}
 .fhb-file-sub{font-size:11px;color:var(--fhb-meta);margin-top:1px;}
 .fhb-sys{display:flex;align-items:center;justify-content:center;gap:12px;margin:16px 8px;opacity:0;animation:fhbIn .4s ease forwards;font-family:var(--fhb-sans);}
 .fhb-sys::before,.fhb-sys::after{content:'';flex:1;max-width:120px;background:linear-gradient(90deg,transparent,var(--fhb-hairline),transparent);height:1px;}
@@ -2394,8 +2593,9 @@ stream_mode = defer`;
 .fhb-dots circle{fill:currentColor;animation:fhbDot 1.2s ease-in-out infinite;}
 .fhb-dots circle:nth-child(2){animation-delay:.18s;}
 .fhb-dots circle:nth-child(3){animation-delay:.36s;}
-.fhb-thread{margin:18px auto;border:1px solid var(--fhb-gold);border-top:2px solid var(--fhb-red);border-radius:16px;overflow:hidden;background:var(--fhb-card-bg);box-shadow:var(--fhb-card-shadow);opacity:0;animation:fhbIn .5s ease forwards;font-family:var(--fhb-sans);color:var(--fhb-ink);max-width:min(92%,520px);}
-.fhb-th-head{display:flex;align-items:center;gap:10px;width:100%;text-align:left;appearance:none;background:var(--fhb-card-head);border:none;border-bottom:1px dashed var(--fhb-hairline);padding:11px 14px;cursor:pointer;color:var(--fhb-ink);font:inherit;transition:var(--fhb-trans);}
+.fhb-thread{position:relative;margin:18px auto;border:1px solid var(--fhb-gold);border-top:2px solid var(--fhb-red);border-radius:16px;overflow:hidden;background:var(--fhb-card-bg);box-shadow:var(--fhb-card-shadow);opacity:0;animation:fhbIn .5s ease forwards;font-family:var(--fhb-sans);color:var(--fhb-ink);max-width:min(92%,520px);}
+.fhb-th-head{position:relative;display:flex;align-items:center;gap:10px;width:100%;text-align:left;appearance:none;background:var(--fhb-card-head);border:none;border-bottom:1px dashed var(--fhb-hairline);border-radius:14px 14px 0 0;padding:11px 78px 11px 14px;cursor:pointer;color:var(--fhb-ink);font:inherit;transition:var(--fhb-trans);}
+.fhb-thread:not(.open) .fhb-th-head{border-radius:14px;}
 .fhb-th-head:hover{background:var(--fhb-card-head-h);}
 .fhb-th-head:active{transform:scale(.995);}
 .fhb-th-icon{width:26px;height:26px;border-radius:8px;background:var(--fhb-red);color:#fff;display:flex;align-items:center;justify-content:center;flex:none;box-shadow:0 0 10px var(--fhb-red-soft);}
@@ -2404,15 +2604,29 @@ stream_mode = defer`;
 .fhb-th-title{font-family:var(--fhb-serif);font-size:13.5px;letter-spacing:.05em;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
 .fhb-th-peek{font-size:11px;color:var(--fhb-meta);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:2px;font-style:italic;}
 .fhb-thread.open .fhb-th-peek{display:none;}
-.fhb-th-count{flex:none;font-size:10px;letter-spacing:.14em;color:var(--fhb-gold);border:1px solid var(--fhb-gold);border-radius:999px;padding:2px 8px;font-variant-numeric:tabular-nums;}
-.fhb-th-toggle{flex:none;font-size:11px;letter-spacing:.18em;color:var(--fhb-meta);display:flex;align-items:center;gap:5px;}
+.fhb-th-actions{position:absolute;top:50%;right:14px;z-index:5;display:flex;align-items:center;transform:translateY(-50%);}
+.fhb-th-toggle{display:flex;align-items:center;justify-content:center;gap:5px;width:auto;height:auto;border:0;background:transparent;color:var(--fhb-meta);font-size:11px;letter-spacing:.12em;white-space:nowrap;}
 .fhb-th-caret{width:10px;height:6px;transition:transform .3s ease;}
 .fhb-thread.open .fhb-th-caret{transform:rotate(180deg);}
 .fhb-thread-body{display:grid;grid-template-rows:0fr;transition:grid-template-rows .45s cubic-bezier(.22,.61,.36,1);}
 .fhb-thread.open .fhb-thread-body{grid-template-rows:1fr;}
-.fhb-thread-inner{overflow:hidden;min-height:0;padding:4px 12px 8px;}
+.fhb-thread-inner{overflow:hidden;min-height:0;padding:0 12px;}
+.fhb-thread.open .fhb-thread-inner{padding:4px 12px 8px;}
 .fhb-thread-inner > .fhb-msg{margin:12px 2px;}
 .fhb-thread-inner > .fhb-sys{margin:8px 4px;}
+@media(max-width:480px){
+.fhb-th-head{position:relative;display:grid;grid-template-columns:26px minmax(0,1fr);align-items:center;gap:10px;padding:10px 74px 10px 12px;}
+.fhb-th-icon{grid-column:1;grid-row:1;}
+.fhb-th-main{grid-column:2;grid-row:1;}
+.fhb-th-title{white-space:normal;overflow:visible;text-overflow:clip;overflow-wrap:anywhere;line-height:1.45;}
+.fhb-th-actions{position:absolute;grid-column:auto;grid-row:auto;top:50%;right:12px;display:flex;align-items:center;transform:translateY(-50%);margin:0;}
+.fhb-th-toggle{width:auto;height:auto;justify-content:center;gap:5px;border:0;border-radius:0;background:transparent;color:var(--fhb-meta);}
+.fhb-sys{flex-wrap:wrap;gap:6px 8px;}
+.fhb-sys::before,.fhb-sys::after{display:none;}
+.fhb-sys-cap{flex:1 1 100%;max-width:100%;white-space:normal;text-align:center;overflow-wrap:anywhere;}
+.fhb-sys-time{flex:1 1 100%;width:100%;text-align:center;white-space:nowrap;}
+.fhb-file{min-width:0;width:100%;}
+}
 @keyframes fhbIn{from{opacity:0;transform:translateY(10px) scale(.98);}to{opacity:1;transform:translateY(0) scale(1);}}
 @keyframes fhbWave{0%,100%{transform:scaleY(.35);}50%{transform:scaleY(1);}}
 @keyframes fhbDot{0%,100%{transform:translateY(0);opacity:.5;}50%{transform:translateY(-3px);opacity:1;}}
@@ -2705,7 +2919,7 @@ stream_mode = defer`;
       });
     }
 
-    // 世界书更新跟随：用户在书里改了配置/链接库后自动重读；自写回波用 quiet 窗口拦截
+    // 世界书更新跟随：角色主世界书导入或更新后，重新检查并补齐工具条目。
     if (tavern_events.WORLDINFO_UPDATED) {
       let wiTimer = null;
       eventOn(tavern_events.WORLDINFO_UPDATED, name => {
@@ -2716,7 +2930,8 @@ stream_mode = defer`;
         clearTimeout(wiTimer);
         wiTimer = setTimeout(async () => {
           if (STK.busy) return;
-          const expected = STK.book || (await resolveBookName());
+          if (!hasActiveChat()) return;
+          const expected = await resolveBookName();
           if (!expected || bookName !== expected) return;
           await bootstrapWorldInfo(false);
           refreshVisuals();
@@ -2841,12 +3056,16 @@ stream_mode = defer`;
         return;
       }
       resetArmedAt = 0;
-      const book = STK.book || (await resolveBookName());
-      if (!book) {
-        toastMsg('未检测到芙林绑定的世界书，请先在世界书面板完成绑定。', 'warning');
+      if (!hasActiveChat()) {
+        toastMsg('当前没有打开的角色聊天，无法定位世界书。', 'warning');
         return;
       }
-      const res = await upsertEntry(book, SPEC.conf, CONFIG_LIB_DEFAULT, true);
+      const primaryBook = STK.book || (await resolveBookName());
+      if (!primaryBook || !(await worldbookExists(primaryBook))) {
+        toastMsg('未找到可写入的世界书，请先为芙林绑定一本已导入的世界书。', 'warning');
+        return;
+      }
+      const res = await upsertEntry(primaryBook, SPEC.conf, CONFIG_LIB_DEFAULT, true);
       if (res === 'failed') {
         toastMsg('重置失败，请检查世界书权限。', 'error');
         return;
