@@ -151,6 +151,21 @@ const previewMetaColor = computed(() => config.value.theme === 'auto'
   ? 'var(--fhbc-muted)'
   : previewTheme.value.meta);
 
+const previewMessageStyle = computed(() => ({
+  gap: `${config.value.message_gap}px`,
+  margin: `${config.value.message_spacing}px 0`,
+  zoom: String(config.value.message_scale),
+}));
+
+const previewAvatarStyle = computed(() => ({
+  width: `${config.value.avatar_size}px`,
+  height: `${config.value.avatar_size}px`,
+}));
+
+const previewColumnStyle = computed(() => ({
+  maxWidth: `min(${config.value.bubble_max_width_percent}%, ${config.value.bubble_max_width_px}px)`,
+}));
+
 function normalizePreviewLength(value: string, property: 'border-width' | 'border-radius', fallback: string): string {
   const trimmed = value.trim();
   if (!trimmed) return fallback;
@@ -169,6 +184,9 @@ function bubbleStyle(actor: AppearanceActor): Record<string, string> {
   const style = {
     background,
     color,
+    fontSize: `${config.value.bubble_font_size}px`,
+    lineHeight: String(config.value.bubble_line_height),
+    padding: `${config.value.bubble_padding_y}px ${config.value.bubble_padding_x}px`,
     borderColor,
     borderStyle: slash ? 'solid' : (custom.border_style || 'solid'),
     borderWidth: normalizePreviewLength(custom.border_width, 'border-width', '1px'),
@@ -248,7 +266,7 @@ onUnmounted(() => {
       <div class="fhbc-scroll">
         <p class="fhbc-notice" :class="messageKind">{{ message }}</p>
 
-        <details open class="fhbc-section">
+        <details class="fhbc-section">
           <summary>基础主题与配色</summary>
           <div class="fhbc-section-body">
             <div class="fhbc-grid cols-3">
@@ -265,7 +283,7 @@ onUnmounted(() => {
           </div>
         </details>
 
-        <details open class="fhbc-section">
+        <details class="fhbc-section">
           <summary>气泡样式</summary>
           <div class="fhbc-section-body">
             <article v-for="actor in APPEARANCE_ACTORS" :key="actor" class="fhbc-subcard">
@@ -279,6 +297,24 @@ onUnmounted(() => {
                 <label class="fhbc-field"><span>气泡圆角</span><input v-model="config.bubble[actor].border_radius" class="fhbc-input" placeholder="如 14px；0 为直角" /></label>
               </div>
             </article>
+          </div>
+        </details>
+
+        <details class="fhbc-section">
+          <summary>尺寸与排版</summary>
+          <div class="fhbc-section-body">
+            <div class="fhbc-grid cols-3">
+              <label class="fhbc-field wide"><span>整体缩放：{{ Math.round(config.message_scale * 100) }}%</span><input v-model.number="config.message_scale" class="fhbc-range" type="range" min="0.5" max="2" step="0.05" /><small>同时缩放气泡、头像、名称及特殊消息</small></label>
+              <label class="fhbc-field"><span>正文字号（px）</span><input v-model.number="config.bubble_font_size" class="fhbc-input" type="number" min="8" max="40" step="0.5" /></label>
+              <label class="fhbc-field"><span>行高（倍数）</span><input v-model.number="config.bubble_line_height" class="fhbc-input" type="number" min="1" max="3" step="0.05" /></label>
+              <label class="fhbc-field"><span>水平内边距（px）</span><input v-model.number="config.bubble_padding_x" class="fhbc-input" type="number" min="0" max="48" step="1" /></label>
+              <label class="fhbc-field"><span>垂直内边距（px）</span><input v-model.number="config.bubble_padding_y" class="fhbc-input" type="number" min="0" max="48" step="1" /></label>
+              <label class="fhbc-field"><span>最大宽度比例（%）</span><input v-model.number="config.bubble_max_width_percent" class="fhbc-input" type="number" min="30" max="100" step="1" /></label>
+              <label class="fhbc-field"><span>最大宽度上限（px）</span><input v-model.number="config.bubble_max_width_px" class="fhbc-input" type="number" min="160" max="1200" step="10" /></label>
+              <label class="fhbc-field"><span>头像尺寸（px）</span><input v-model.number="config.avatar_size" class="fhbc-input" type="number" min="20" max="120" step="1" /></label>
+              <label class="fhbc-field"><span>头像与气泡间距（px）</span><input v-model.number="config.message_gap" class="fhbc-input" type="number" min="0" max="48" step="1" /></label>
+              <label class="fhbc-field"><span>消息上下间距（px）</span><input v-model.number="config.message_spacing" class="fhbc-input" type="number" min="0" max="80" step="1" /></label>
+            </div>
           </div>
         </details>
 
@@ -316,12 +352,13 @@ onUnmounted(() => {
         </details>
 
         <details class="fhbc-section">
-          <summary>尺寸、别名与高级选项</summary>
+          <summary>媒体、别名与高级选项</summary>
           <div class="fhbc-section-body">
             <div class="fhbc-grid cols-3">
               <label class="fhbc-field"><span>表情包宽度</span><input v-model="config.sticker_size" class="fhbc-input" placeholder="如 120px" /></label>
-              <label class="fhbc-field"><span>随机图片宽度</span><input v-model.number="config.image_width" class="fhbc-input" type="number" min="32" max="4096" /></label>
-              <label class="fhbc-field"><span>随机图片高度</span><input v-model.number="config.image_height" class="fhbc-input" type="number" min="32" max="4096" /></label>
+              <label class="fhbc-field"><span>image 自动生图</span><select v-model="config.image_auto_generate" class="fhbc-input"><option :value="true">开启</option><option :value="false">关闭（仅显示文字）</option></select></label>
+              <label class="fhbc-field"><span>随机图片宽度</span><input v-model.number="config.image_width" class="fhbc-input" type="number" min="32" max="4096" :disabled="!config.image_auto_generate" /></label>
+              <label class="fhbc-field"><span>随机图片高度</span><input v-model.number="config.image_height" class="fhbc-input" type="number" min="32" max="4096" :disabled="!config.image_auto_generate" /></label>
               <label class="fhbc-field wide"><span>主角色别名</span><input v-model="config.char_aliases" class="fhbc-input" placeholder="多个别名用逗号分隔" /></label>
             </div>
             <article class="fhbc-subcard">
@@ -339,12 +376,12 @@ onUnmounted(() => {
         <section class="fhbc-preview-section">
           <div class="fhbc-preview-heading"><div><p class="fhbc-eyebrow">LIVE PREVIEW</p><h2>气泡预览</h2></div><span>修改会即时显示在这里</span></div>
           <div class="fhbc-preview" :style="previewSurfaceStyle">
-            <div v-for="actor in APPEARANCE_ACTORS" :key="actor" class="fhbc-preview-message" :class="{ user: actor === 'user' }">
-              <div class="fhbc-preview-avatar">
+            <div v-for="actor in APPEARANCE_ACTORS" :key="actor" class="fhbc-preview-message" :class="{ user: actor === 'user' }" :style="previewMessageStyle">
+              <div class="fhbc-preview-avatar" :style="previewAvatarStyle">
                 <img v-if="avatarFor(actor)" :src="avatarFor(actor)" alt="" />
                 <span v-else>{{ actor === 'user' ? '我' : actor === 'char' ? '角' : 'N' }}</span>
               </div>
-              <div class="fhbc-preview-col">
+              <div class="fhbc-preview-col" :style="previewColumnStyle">
                 <div class="fhbc-preview-meta" :style="{ color: previewMetaColor }">{{ actorLabels[actor] }} · 21:18</div>
                 <div class="fhbc-preview-wrap">
                   <div class="fhbc-preview-bubble" :style="bubbleStyle(actor)">{{ actor === 'user' ? '好，马上来。' : actor === 'char' ? '现在' : '收到。' }}</div>

@@ -34,11 +34,22 @@ export interface AppearanceConfig {
   accent_light: string;
   accent2_light: string;
   bubble: Record<AppearanceActor, BubbleAppearance>;
+  message_scale: number;
+  bubble_font_size: number;
+  bubble_line_height: number;
+  bubble_padding_x: number;
+  bubble_padding_y: number;
+  bubble_max_width_percent: number;
+  bubble_max_width_px: number;
+  avatar_size: number;
+  message_gap: number;
+  message_spacing: number;
   deco: Record<DecoActor, Record<DecoCorner, string>>;
   deco_size: string;
   deco_offset: number;
   theme: 'auto' | 'dark' | 'light';
   sticker_size: string;
+  image_auto_generate: boolean;
   image_width: number;
   image_height: number;
   collapse_min: number;
@@ -67,11 +78,22 @@ export function createDefaultAppearanceConfig(): AppearanceConfig {
     accent_light: '#2b6d8c',
     accent2_light: '#97722c',
     bubble: { user: emptyBubble(), char: emptyBubble(), npc: emptyBubble() },
+    message_scale: 1,
+    bubble_font_size: 14.5,
+    bubble_line_height: 1.65,
+    bubble_padding_x: 14,
+    bubble_padding_y: 10,
+    bubble_max_width_percent: 72,
+    bubble_max_width_px: 480,
+    avatar_size: 40,
+    message_gap: 11,
+    message_spacing: 14,
     deco: emptyDeco(),
     deco_size: '',
     deco_offset: 40,
     theme: 'auto',
     sticker_size: '',
+    image_auto_generate: true,
     image_width: 640,
     image_height: 400,
     collapse_min: 3,
@@ -88,6 +110,19 @@ function asString(value: unknown, fallback = ''): string {
 function asNumber(value: unknown, fallback: number): number {
   const n = Number(value);
   return Number.isFinite(n) ? n : fallback;
+}
+
+function asBoolean(value: unknown, fallback: boolean): boolean {
+  if (typeof value === 'boolean') return value;
+  if (typeof value !== 'string') return fallback;
+  const normalized = value.trim().toLowerCase();
+  if (['true', '1', 'yes', 'on', '是', '开启'].includes(normalized)) return true;
+  if (['false', '0', 'no', 'off', '否', '关闭'].includes(normalized)) return false;
+  return fallback;
+}
+
+function clampNumber(value: unknown, fallback: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, asNumber(value, fallback)));
 }
 
 export function normalizeAppearanceConfig(input: unknown): AppearanceConfig {
@@ -150,11 +185,27 @@ export function normalizeAppearanceConfig(input: unknown): AppearanceConfig {
     accent_light: asString(wrapped.accent_light, defaults.accent_light),
     accent2_light: asString(wrapped.accent2_light, defaults.accent2_light),
     bubble,
+    message_scale: clampNumber(wrapped.message_scale, defaults.message_scale, 0.5, 2),
+    bubble_font_size: clampNumber(wrapped.bubble_font_size, defaults.bubble_font_size, 8, 40),
+    bubble_line_height: clampNumber(wrapped.bubble_line_height, defaults.bubble_line_height, 1, 3),
+    bubble_padding_x: clampNumber(wrapped.bubble_padding_x, defaults.bubble_padding_x, 0, 48),
+    bubble_padding_y: clampNumber(wrapped.bubble_padding_y, defaults.bubble_padding_y, 0, 48),
+    bubble_max_width_percent: clampNumber(
+      wrapped.bubble_max_width_percent,
+      defaults.bubble_max_width_percent,
+      30,
+      100,
+    ),
+    bubble_max_width_px: clampNumber(wrapped.bubble_max_width_px, defaults.bubble_max_width_px, 160, 1200),
+    avatar_size: clampNumber(wrapped.avatar_size, defaults.avatar_size, 20, 120),
+    message_gap: clampNumber(wrapped.message_gap, defaults.message_gap, 0, 48),
+    message_spacing: clampNumber(wrapped.message_spacing, defaults.message_spacing, 0, 80),
     deco,
     deco_size: asString(wrapped.deco_size),
     deco_offset: Math.max(-100, Math.min(100, asNumber(wrapped.deco_offset, defaults.deco_offset))),
     theme,
     sticker_size: asString(wrapped.sticker_size),
+    image_auto_generate: asBoolean(wrapped.image_auto_generate, defaults.image_auto_generate),
     image_width: Math.max(32, Math.round(asNumber(wrapped.image_width, defaults.image_width))),
     image_height: Math.max(32, Math.round(asNumber(wrapped.image_height, defaults.image_height))),
     collapse_min: Math.max(1, Math.round(asNumber(wrapped.collapse_min, defaults.collapse_min))),
@@ -217,10 +268,21 @@ export function parseAppearanceConfigText(text: string): AppearanceConfig {
       case 'accent2_dark': model.accent2_dark = value; break;
       case 'accent_light': model.accent_light = value; break;
       case 'accent2_light': model.accent2_light = value; break;
+      case 'message_scale': model.message_scale = asNumber(value, model.message_scale); break;
+      case 'bubble_font_size': model.bubble_font_size = asNumber(value, model.bubble_font_size); break;
+      case 'bubble_line_height': model.bubble_line_height = asNumber(value, model.bubble_line_height); break;
+      case 'bubble_padding_x': model.bubble_padding_x = asNumber(value, model.bubble_padding_x); break;
+      case 'bubble_padding_y': model.bubble_padding_y = asNumber(value, model.bubble_padding_y); break;
+      case 'bubble_max_width_percent': model.bubble_max_width_percent = asNumber(value, model.bubble_max_width_percent); break;
+      case 'bubble_max_width_px': model.bubble_max_width_px = asNumber(value, model.bubble_max_width_px); break;
+      case 'avatar_size': model.avatar_size = asNumber(value, model.avatar_size); break;
+      case 'message_gap': model.message_gap = asNumber(value, model.message_gap); break;
+      case 'message_spacing': model.message_spacing = asNumber(value, model.message_spacing); break;
       case 'deco_size': model.deco_size = value; break;
       case 'deco_offset': model.deco_offset = Math.max(-100, Math.min(100, asNumber(value, 40))); break;
       case 'theme': if (['auto', 'dark', 'light'].includes(value)) model.theme = value as AppearanceConfig['theme']; break;
       case 'sticker_size': model.sticker_size = value; break;
+      case 'image_auto_generate': model.image_auto_generate = asBoolean(value, model.image_auto_generate); break;
       case 'collapse_min': model.collapse_min = Math.max(1, Math.round(asNumber(value, 3))); break;
       case 'char_aliases': model.char_aliases = value; break;
       case 'stream_mode': if (['defer', 'live'].includes(value)) model.stream_mode = value as AppearanceConfig['stream_mode']; break;
@@ -279,7 +341,20 @@ export function serializeAppearanceConfigText(input: AppearanceConfig, templateV
     );
   }
 
-  lines.push('', '# 四、四角装饰');
+  lines.push(
+    '', '# 四、气泡尺寸与排版',
+    `message_scale = ${model.message_scale}`,
+    `bubble_font_size = ${model.bubble_font_size}`,
+    `bubble_line_height = ${model.bubble_line_height}`,
+    `bubble_padding_x = ${model.bubble_padding_x}`,
+    `bubble_padding_y = ${model.bubble_padding_y}`,
+    `bubble_max_width_percent = ${model.bubble_max_width_percent}`,
+    `bubble_max_width_px = ${model.bubble_max_width_px}`,
+    `avatar_size = ${model.avatar_size}`,
+    `message_gap = ${model.message_gap}`,
+    `message_spacing = ${model.message_spacing}`,
+    '', '# 五、四角装饰',
+  );
   for (const actor of DECO_ACTORS) {
     for (const corner of DECO_CORNERS) {
       const value = model.deco[actor][corner];
@@ -290,9 +365,10 @@ export function serializeAppearanceConfigText(input: AppearanceConfig, templateV
   lines.push(
     `deco_size = ${cleanLine(model.deco_size)}`,
     `deco_offset = ${model.deco_offset}`,
-    '', '# 五、其它',
+    '', '# 六、其它',
     `theme = ${model.theme}`,
     `sticker_size = ${cleanLine(model.sticker_size)}`,
+    `image_auto_generate = ${model.image_auto_generate}`,
     `image_size = ${model.image_width}x${model.image_height}`,
     `collapse_min = ${model.collapse_min}`,
     `char_aliases = ${cleanLine(model.char_aliases)}`,
