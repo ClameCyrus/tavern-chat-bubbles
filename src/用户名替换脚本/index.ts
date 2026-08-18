@@ -8,6 +8,7 @@ type ReplacementRule = {
   source: string;
   replacement_text: string;
   image_url: string;
+  blurred: boolean;
 };
 
 type CustomProfile = {
@@ -124,7 +125,7 @@ type ChatMessagePatch = {
   data?: Record<string, any>;
 };
 
-const LOG_PREFIX = '[用户名替换脚本V1.98.2]';
+const LOG_PREFIX = '[用户名替换脚本V2.0]';
 const DEFAULT_CUSTOM_PROFILE_ID = 'profile-1';
 const DEFAULT_CUSTOM_THEME_PROFILE_ID = 'theme-1';
 const USER_RULE_SOURCE = '{{user}}';
@@ -142,6 +143,8 @@ const ST_CHATU8_MANAGED_SELECTOR = [
   '.st-chatu8-image-container',
   '.st-chatu8-collapse-wrapper',
 ].join(', ');
+const MESSAGE_DISPLAY_CONTENT_SELECTOR = '.mes_text, .mes_reasoning';
+const MESSAGE_DISPLAY_IFRAME_SELECTOR = '.mes_text iframe, .mes_reasoning iframe';
 
 const ThemeCustomColorsSchema = z.object({
   bgPaper: z.string().default('#f7f3e8'),
@@ -164,6 +167,7 @@ const ReplacementRuleSchema = z.object({
   source: z.string().default(''),
   replacement_text: z.string().default(''),
   image_url: z.string().default(''),
+  blurred: z.boolean().default(false),
 });
 
 const CustomProfileSchema = z.object({
@@ -208,6 +212,12 @@ const SettingsSchema = z
 
     // 是否直接写回聊天正文
     replace_message_content: z.boolean().default(false),
+
+    // 是否同时替换聊天楼层标题中的用户/角色名称
+    replace_message_header_names: z.boolean().default(false),
+
+    // 是否替换“回声小剧场”的角色标题与 Shadow DOM 正文
+    replace_echo_theater: z.boolean().default(false),
 
     // {{user}} 对应名称替换
     user_enabled: z.boolean().default(true),
@@ -530,6 +540,7 @@ function parseCustomRules(raw: string): ReplacementRule[] {
       source,
       replacement_text,
       image_url,
+      blurred: false,
     });
   }
 
@@ -550,6 +561,7 @@ function normalizeReplacementRule(rule: ReplacementRule): ReplacementRule {
     source: String(rule.source ?? ''),
     replacement_text: String(rule.replacement_text ?? ''),
     image_url: normalizeUrl(String(rule.image_url ?? '')),
+    blurred: Boolean(rule.blurred),
   };
 }
 
@@ -619,8 +631,8 @@ function serializeCustomRulesRaw(rules: ReplacementRule[]): string {
 
 function getDefaultProfileRules(): ReplacementRule[] {
   return [
-    { enabled: true, source: USER_RULE_SOURCE, replacement_text: 'user', image_url: '' },
-    { enabled: true, source: CHAR_RULE_SOURCE, replacement_text: 'char', image_url: '' },
+    { enabled: true, source: USER_RULE_SOURCE, replacement_text: 'user', image_url: '', blurred: false },
+    { enabled: true, source: CHAR_RULE_SOURCE, replacement_text: 'char', image_url: '', blurred: false },
   ];
 }
 
@@ -633,6 +645,7 @@ function getLegacyProfilePrefix(settings: Settings): ReplacementRule[] {
       source: USER_RULE_SOURCE,
       replacement_text: settings.user_replacement_text.trim(),
       image_url: normalizeUrl(settings.user_image_url),
+      blurred: false,
     });
   }
 
@@ -642,6 +655,7 @@ function getLegacyProfilePrefix(settings: Settings): ReplacementRule[] {
       source: CHAR_RULE_SOURCE,
       replacement_text: settings.char_replacement_text.trim(),
       image_url: normalizeUrl(settings.char_image_url),
+      blurred: false,
     });
   }
 
@@ -855,6 +869,96 @@ function makeReplacementImage(
   return image;
 }
 
+type ReplacementTextStyle = 'plain' | 'italic' | 'bold' | 'bold_italic' | 'code';
+
+type ReplacementTextSegment = {
+  text: string;
+  style: ReplacementTextStyle;
+};
+
+function parseReplacementTextSegments(source: string): ReplacementTextSegment[] {
+  const formatPattern =
+    /<code>([\s\S]*?)<\/code>|`([^`\r\n]+)`|\*\*\*([^*\r\n]+)\*\*\*|\*\*([^*\r\n]+)\*\*|\*([^*\r\n]+)\*/gi;
+  const segments: ReplacementTextSegment[] = [];
+  let lastIndex = 0;
+
+  for (const match of source.matchAll(formatPattern)) {
+    const start = match.index;
+    if (start > lastIndex) {
+      segments.push({ text: source.slice(lastIndex, start), style: 'plain' });
+    }
+
+    if (match[1] !== undefined) {
+      segments.push({ text: match[1], style: 'code' });
+    } else if (match[2] !== undefined) {
+      segments.push({ text: match[2], style: 'code' });
+    } else if (match[3] !== undefined) {
+      segments.push({ text: match[3], style: 'bold_italic' });
+    } else if (match[4] !== undefined) {
+      segments.push({ text: match[4], style: 'bold' });
+    } else if (match[5] !== undefined) {
+      segments.push({ text: match[5], style: 'italic' });
+    }
+
+    lastIndex = start + match[0].length;
+  }
+
+  if (lastIndex < source.length) {
+    segments.push({ text: source.slice(lastIndex), style: 'plain' });
+  }
+
+  return segments;
+}
+
+function getPlainReplacementText(source: string): string {
+  return parseReplacementTextSegments(source)
+    .map(segment => segment.text)
+    .join('');
+}
+
+function appendFormattedReplacementText(parent: HTMLElement, source: string, ownerDocument: Document) {
+  for (const segment of parseReplacementTextSegments(source)) {
+    if (!segment.text) continue;
+    if (segment.style === 'plain') {
+      parent.appendChild(ownerDocument.createTextNode(segment.text));
+      continue;
+    }
+
+    if (segment.style === 'code') {
+      const code = ownerDocument.createElement('code');
+      code.textContent = segment.text;
+      setImportantStyles(code, {
+        display: 'inline-block',
+        padding: '0.08em 0.36em',
+        border: '1px solid color-mix(in srgb, currentColor 24%, transparent)',
+        'border-radius': '0.4em',
+        background: 'color-mix(in srgb, currentColor 8%, transparent)',
+        color: 'inherit',
+        'font-family': 'inherit',
+        'font-size': 'inherit',
+        'font-style': 'inherit',
+        'font-weight': 'inherit',
+        'letter-spacing': 'inherit',
+        'line-height': '1.25',
+        'vertical-align': 'baseline',
+        'white-space': 'nowrap',
+      });
+      parent.appendChild(code);
+      continue;
+    }
+
+    const styled = ownerDocument.createElement('span');
+    styled.textContent = segment.text;
+    if (segment.style === 'bold' || segment.style === 'bold_italic') {
+      styled.style.setProperty('font-weight', '700', 'important');
+    }
+    if (segment.style === 'italic' || segment.style === 'bold_italic') {
+      styled.style.setProperty('font-style', 'italic', 'important');
+    }
+    parent.appendChild(styled);
+  }
+}
+
 function makeReplacementNode(
   original: string,
   rule: ReplacementRule,
@@ -892,7 +996,17 @@ function makeReplacementNode(
     'box-sizing': 'border-box',
   });
 
+  if (rule.blurred) {
+    setImportantStyles($wrap[0] as HTMLElement, {
+      filter: 'blur(4px)',
+      '-webkit-filter': 'blur(4px)',
+      'user-select': 'none',
+      '-webkit-user-select': 'none',
+    });
+  }
+
   const text = rule.replacement_text.trim();
+  const plainText = getPlainReplacementText(text);
   const image_url = normalizeUrl(rule.image_url);
   const displayMode = getDisplayReplaceMode(settings);
   const hasImage = Boolean(image_url);
@@ -901,7 +1015,7 @@ function makeReplacementNode(
   const shouldShowText = hasText && (!hasImage || displayMode !== 'image_only');
 
   if (shouldShowImage) {
-    const alt = text || original || 'replaced';
+    const alt = plainText || original || 'replaced';
     const image = makeReplacementImage(ownerDocument, image_url, alt, shouldShowText && text ? '0.35em' : '0');
 
     if (!shouldShowText) {
@@ -914,15 +1028,15 @@ function makeReplacementNode(
   }
 
   if (shouldShowText) {
-    $wrap.append(ownerDocument.createTextNode(text));
+    appendFormattedReplacementText($wrap[0] as HTMLElement, text, ownerDocument);
   } else if (!hasImage && !hasText) {
     // 图片文本都空时，明确按空替换处理。
   } else if (!shouldShowImage) {
     // 当前模式隐藏了已有内容时，回退到仍可显示的那一项
     if (hasText) {
-      $wrap.append(ownerDocument.createTextNode(text));
+      appendFormattedReplacementText($wrap[0] as HTMLElement, text, ownerDocument);
     } else if (hasImage) {
-      const alt = text || original || 'replaced';
+      const alt = plainText || original || 'replaced';
       $wrap.append(makeReplacementImage(ownerDocument, image_url, alt));
     }
   }
@@ -1011,7 +1125,7 @@ function restoreElement($el: any) {
 
 function restoreAll() {
   $('#chat > .mes')
-    .find('.mes_text')
+    .find(`${MESSAGE_DISPLAY_CONTENT_SELECTOR}, .name_text`)
     .each((_idx: number, el: HTMLElement) => {
       restoreElement($(el));
     });
@@ -1042,12 +1156,28 @@ function isInsideStChatu8SourceTag(element: Element, root: HTMLElement): boolean
   return false;
 }
 
+function isInsideTavernHelperFrontendSource(element: Element): boolean {
+  const code = element.closest('code');
+  if (!code) return false;
+
+  // 酒馆助手会把这类隐藏代码块当作 iframe 的 HTML 源码读取。若提前往源码 DOM
+  // 插入替换 span，渲染器会把 span 当成页面内容，最终在 iframe 末尾泄漏出 USERUSER。
+  if (code.classList.contains('custom-html')) return true;
+
+  const pre = code.closest('pre');
+  return Boolean(pre?.classList.contains('hidden!') && pre.parentElement?.classList.contains('TH-render'));
+}
+
 function shouldSkipReplacementNode(node: Text, root: HTMLElement): boolean {
   const parent = node.parentElement;
   if (!parent) return true;
 
-  // 不处理代码、表单内容、本脚本已生成的节点，以及 st-chatu8 动态挂载的交互区域。
-  if (parent.closest(`code, pre, textarea, script, style, .${REPLACEMENT_CLASS}, ${ST_CHATU8_MANAGED_SELECTOR}`)) {
+  // 普通 Markdown code/pre 仍允许替换；酒馆助手 iframe 的隐藏 HTML 源码必须保持纯文本，
+  // 等 iframe 渲染完成后再由 applyToNestedIframe 处理可见内容。
+  if (isInsideTavernHelperFrontendSource(parent)) return true;
+
+  // 仍跳过表单、可执行内容、本脚本节点和 st-chatu8 交互区域。
+  if (parent.closest(`textarea, script, style, .${REPLACEMENT_CLASS}, ${ST_CHATU8_MANAGED_SELECTOR}`)) {
     return true;
   }
 
@@ -1056,7 +1186,62 @@ function shouldSkipReplacementNode(node: Text, root: HTMLElement): boolean {
   return isInsideStChatu8SourceTag(parent, root);
 }
 
+type TextNodeSlice = {
+  node: Text;
+  start: number;
+  end: number;
+};
+
+function replaceTextAcrossCodeMarkup(code: HTMLElement, matcher: CompiledMatcher, settings: Settings) {
+  const walker = code.ownerDocument.createTreeWalker(code, NodeFilter.SHOW_TEXT);
+  const slices: TextNodeSlice[] = [];
+  let source = '';
+
+  while (walker.nextNode()) {
+    const node = walker.currentNode as Text;
+    if (shouldSkipReplacementNode(node, code)) continue;
+
+    const text = node.nodeValue ?? '';
+    if (!text) continue;
+
+    const start = source.length;
+    source += text;
+    slices.push({ node, start, end: source.length });
+  }
+
+  if (!source || slices.length === 0) return;
+
+  const matches: Array<{ token: string; rule: ReplacementRule; start: number; end: number }> = [];
+  let fromIndex = 0;
+  while (true) {
+    const match = findNextTokenMatch(source, matcher, fromIndex);
+    if (!match) break;
+    matches.push(match);
+    fromIndex = match.end;
+  }
+
+  // 从后往前改 DOM，前方文本节点的 offset 才不会因后方替换而移动。
+  matches.reverse().forEach(match => {
+    const startSlice = slices.find(slice => match.start >= slice.start && match.start < slice.end);
+    const endSlice = slices.find(slice => match.end > slice.start && match.end <= slice.end);
+    if (!startSlice || !endSlice || !startSlice.node.isConnected || !endSlice.node.isConnected) return;
+
+    const range = code.ownerDocument.createRange();
+    range.setStart(startSlice.node, match.start - startSlice.start);
+    range.setEnd(endSlice.node, match.end - endSlice.start);
+    range.deleteContents();
+    range.insertNode(makeReplacementNode(match.token, match.rule, settings, code.ownerDocument));
+    range.detach();
+  });
+}
+
 function replaceTextNodesByMatcher(root: HTMLElement, matcher: CompiledMatcher, settings: Settings) {
+  // Highlight.js 会把 {{user}} 拆成 "{{"、<span>user</span>、"}}" 三个文本节点；
+  // 先在每个 code 的完整 textContent 坐标中匹配，再用 Range 跨节点替换。
+  root.querySelectorAll<HTMLElement>('code').forEach(code => {
+    replaceTextAcrossCodeMarkup(code, matcher, settings);
+  });
+
   const walker = root.ownerDocument.createTreeWalker(root, NodeFilter.SHOW_TEXT);
   const nodes: Text[] = [];
 
@@ -1244,7 +1429,7 @@ function applyToNestedMessageIframes($mes: any, matcher: CompiledMatcher | null,
   cleanupDisconnectedNestedIframeDisplayStates();
   const eventNamespace = `.TH_user_name_replace_nested_iframe_${getScriptId()}`;
 
-  $mes.find('.mes_text iframe').each((_idx: number, element: HTMLIFrameElement) => {
+  $mes.find(MESSAGE_DISPLAY_IFRAME_SELECTOR).each((_idx: number, element: HTMLIFrameElement) => {
     const $frame = $(element);
     $frame.off(`load${eventNamespace}`).on(`load${eventNamespace}`, () => {
       destroyNestedIframeDisplayState(element);
@@ -1256,15 +1441,22 @@ function applyToNestedMessageIframes($mes: any, matcher: CompiledMatcher | null,
 
 function destroyNestedIframeDisplayEnhancements(restore: boolean) {
   const eventNamespace = `.TH_user_name_replace_nested_iframe_${getScriptId()}`;
-  $('#chat > .mes .mes_text iframe').off(`load${eventNamespace}`);
+  $('#chat > .mes').find(MESSAGE_DISPLAY_IFRAME_SELECTOR).off(`load${eventNamespace}`);
   for (const frame of Array.from(nestedIframeDisplayStates.keys())) {
     destroyNestedIframeDisplayState(frame, restore);
   }
 }
 
 function applyToMessageElement($mes: any, matcher: CompiledMatcher | null, settings: Settings) {
-  // 仅正文
-  $mes.find('.mes_text').each((_idx: number, el: HTMLElement) => {
+  $mes.find('.name_text').each((_idx: number, el: HTMLElement) => {
+    if (settings.replace_message_header_names) {
+      applyToTargetElement($(el), matcher, settings);
+    } else {
+      restoreElement($(el));
+    }
+  });
+
+  $mes.find(MESSAGE_DISPLAY_CONTENT_SELECTOR).each((_idx: number, el: HTMLElement) => {
     applyToTargetElement($(el), matcher, settings);
   });
   applyToNestedMessageIframes($mes, matcher, settings);
@@ -1285,6 +1477,148 @@ function applyToAllVisible(settings: Settings) {
   $('#chat > .mes').each((_idx: number, el: HTMLElement) => {
     applyToMessageElement($(el), matcher, settings);
   });
+}
+
+type EchoTheaterShadowState = {
+  observer: MutationObserver;
+};
+
+function createEchoTheaterEnhancer(
+  getSettings: () => Settings,
+  pDoc: Document,
+  pWin: Window,
+): { reapply: () => void; destroy: (restore: boolean) => void } {
+  const ParentMutationObserver = (pWin as any).MutationObserver as typeof MutationObserver | undefined;
+  const shadowStates = new Map<ShadowRoot, EchoTheaterShadowState>();
+  let destroyed = false;
+  let outputElement: HTMLElement | null = null;
+  let outputObserver: MutationObserver | null = null;
+  let documentObserver: MutationObserver | null = null;
+  let trackedTitle: HTMLElement | null = null;
+  let applyTimer: number | null = null;
+
+  const restoreShadowRoot = (root: ShadowRoot) => {
+    root.querySelectorAll<HTMLElement>('.t-shadow-content').forEach(content => restoreElement($(content)));
+  };
+
+  const destroyShadowState = (root: ShadowRoot, restore: boolean) => {
+    const state = shadowStates.get(root);
+    if (!state) return;
+    state.observer.disconnect();
+    if (restore) restoreShadowRoot(root);
+    shadowStates.delete(root);
+  };
+
+  const restoreTitle = () => {
+    if (!trackedTitle) return;
+    restoreElement($(trackedTitle));
+    trackedTitle = null;
+  };
+
+  const scheduleApply = () => {
+    if (destroyed) return;
+    if (applyTimer !== null) pWin.clearTimeout(applyTimer);
+    applyTimer = pWin.setTimeout(() => {
+      applyTimer = null;
+      reapply();
+    }, 80);
+  };
+
+  const observeOutputElement = () => {
+    const nextOutput = pDoc.querySelector<HTMLElement>('#t-output-content');
+    if (nextOutput === outputElement) return;
+
+    outputObserver?.disconnect();
+    outputObserver = null;
+    outputElement = nextOutput;
+
+    if (!outputElement || !ParentMutationObserver) return;
+    outputObserver = new ParentMutationObserver(scheduleApply);
+    outputObserver.observe(outputElement, { childList: true, characterData: true, subtree: true });
+  };
+
+  const observeShadowRoot = (root: ShadowRoot) => {
+    let state = shadowStates.get(root);
+    if (!state) {
+      const ShadowMutationObserver = (root.ownerDocument.defaultView as any)?.MutationObserver as
+        typeof MutationObserver | undefined;
+      if (!ShadowMutationObserver) return;
+      state = { observer: new ShadowMutationObserver(scheduleApply) };
+      shadowStates.set(root, state);
+    }
+    state.observer.observe(root, { childList: true, characterData: true, subtree: true });
+  };
+
+  const reapply = () => {
+    if (destroyed) return;
+    if (applyTimer !== null) pWin.clearTimeout(applyTimer);
+    applyTimer = null;
+    observeOutputElement();
+
+    // 替换过程中暂停观察，避免本脚本插入/还原节点触发自己的观察器。
+    outputObserver?.disconnect();
+    shadowStates.forEach(state => state.observer.disconnect());
+
+    const settings = getSettings();
+    const active = settings.enabled && settings.replace_echo_theater;
+    const matcher = active ? compileMatcher(buildRules(settings)) : null;
+    const nextTitle = pDoc.querySelector<HTMLElement>('#t-char-name');
+
+    if (trackedTitle && trackedTitle !== nextTitle) restoreTitle();
+    trackedTitle = nextTitle;
+    if (trackedTitle) {
+      restoreElement($(trackedTitle));
+      if (active && matcher) applyToTargetElement($(trackedTitle), matcher, settings);
+    }
+
+    const activeRoots = new Set<ShadowRoot>();
+    outputElement?.querySelectorAll<HTMLElement>('.t-shadow-host').forEach(host => {
+      const root = host.shadowRoot;
+      if (!root) return;
+      activeRoots.add(root);
+
+      root.querySelectorAll<HTMLElement>('.t-shadow-content').forEach(content => {
+        restoreElement($(content));
+        if (active && matcher) applyToTargetElement($(content), matcher, settings);
+      });
+      observeShadowRoot(root);
+    });
+
+    for (const root of Array.from(shadowStates.keys())) {
+      if (!activeRoots.has(root) || !root.host.isConnected) destroyShadowState(root, true);
+    }
+
+    if (outputElement && ParentMutationObserver) {
+      outputObserver ??= new ParentMutationObserver(scheduleApply);
+      outputObserver.observe(outputElement, { childList: true, characterData: true, subtree: true });
+    }
+  };
+
+  if (ParentMutationObserver && pDoc.body) {
+    // #t-output-content 本身可能随小剧场的关闭与重新打开而重建；这里只负责重新绑定目标观察器。
+    documentObserver = new ParentMutationObserver(() => {
+      const nextOutput = pDoc.querySelector<HTMLElement>('#t-output-content');
+      if (nextOutput !== outputElement) scheduleApply();
+    });
+    documentObserver.observe(pDoc.body, { childList: true, subtree: true });
+  }
+
+  return {
+    reapply,
+    destroy: restore => {
+      if (destroyed) return;
+      destroyed = true;
+      if (applyTimer !== null) pWin.clearTimeout(applyTimer);
+      applyTimer = null;
+      outputObserver?.disconnect();
+      outputObserver = null;
+      documentObserver?.disconnect();
+      documentObserver = null;
+      restoreTitle();
+      for (const root of Array.from(shadowStates.keys())) destroyShadowState(root, restore);
+      outputElement = null;
+    },
+  };
 }
 
 function getMessageState(message_id: number): MessageState | null {
@@ -1565,9 +1899,9 @@ function buildSettingsOverlay(
   transform: none !important;
   margin: 0 !important;
   flex: 0 1 auto !important;
-  width: min(720px, calc(100vw - 28px)) !important;
-  max-width: calc(100vw - 28px) !important;
-  max-height: calc(100dvh - 28px) !important;
+  width: min(1120px, calc(100vw - 32px)) !important;
+  max-width: calc(100vw - 32px) !important;
+  max-height: calc(100dvh - 24px) !important;
   display: flex !important;
   flex-direction: column !important;
   overflow: hidden !important;
@@ -1579,6 +1913,166 @@ function buildSettingsOverlay(
   overflow-x: hidden !important;
   max-width: 100% !important;
   -webkit-overflow-scrolling: touch !important;
+}
+.${rootClass} .TH-user-name-settings-overview {
+  display: grid !important;
+  grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+  gap: 12px !important;
+  align-items: stretch !important;
+}
+.${rootClass} .TH-user-name-settings-overview > .TH-user-name-settings-section {
+  height: 100% !important;
+  align-content: start !important;
+}
+.${rootClass} .TH-user-name-settings-section-wide {
+  grid-column: 1 / -1 !important;
+}
+.${rootClass} .TH-user-name-settings-section-header {
+  display: flex !important;
+  align-items: center !important;
+  justify-content: space-between !important;
+  gap: 10px !important;
+  width: 100% !important;
+  padding: 0 !important;
+  border: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
+  color: inherit !important;
+  text-align: left !important;
+  cursor: default !important;
+}
+.${rootClass} .TH-user-name-settings-section-title {
+  display: flex !important;
+  align-items: center !important;
+  gap: 7px !important;
+  min-width: 0 !important;
+  font-size: 14px !important;
+  font-weight: 700 !important;
+}
+.${rootClass} .TH-user-name-settings-section-chevron {
+  display: none !important;
+  transition: transform .18s ease !important;
+}
+.${rootClass} .TH-user-name-settings-section.is-collapsible > .TH-user-name-settings-section-header {
+  cursor: pointer !important;
+}
+.${rootClass} .TH-user-name-settings-section.is-collapsible > .TH-user-name-settings-section-header .TH-user-name-settings-section-chevron {
+  display: inline-block !important;
+}
+.${rootClass} .TH-user-name-settings-section.is-collapsed > .TH-user-name-settings-section-content {
+  display: none !important;
+}
+.${rootClass} .TH-user-name-settings-section.is-collapsed > .TH-user-name-settings-section-header .TH-user-name-settings-section-chevron {
+  transform: rotate(-90deg) !important;
+}
+.${rootClass} .TH-user-name-settings-section-content {
+  display: grid !important;
+  gap: 9px !important;
+  min-width: 0 !important;
+  align-content: start !important;
+}
+.${rootClass} .TH-user-name-settings-floating .TH-user-name-settings-section-content {
+  grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+  align-items: stretch !important;
+  gap: 10px !important;
+}
+.${rootClass} .TH-user-name-floating-group {
+  display: grid !important;
+  align-content: start !important;
+  gap: 8px !important;
+  min-width: 0 !important;
+  padding: 10px 12px !important;
+  border: 1px solid color-mix(in srgb, currentColor 12%, transparent) !important;
+  border-radius: 12px !important;
+}
+.${rootClass} .TH-user-name-floating-group-title {
+  font-size: 12px !important;
+  font-weight: 700 !important;
+  line-height: 1.4 !important;
+}
+.${rootClass} .TH-user-name-theme-custom {
+  padding: 10px !important;
+  gap: 8px !important;
+  box-shadow: none !important;
+}
+.${rootClass} .TH-user-name-theme-toolbar {
+  display: grid !important;
+  grid-template-columns: minmax(0, 1fr) !important;
+  gap: 8px !important;
+}
+.${rootClass} .TH-user-name-theme-toolbar-actions {
+  display: grid !important;
+  grid-template-columns: repeat(5, minmax(0, 1fr)) !important;
+  gap: 6px !important;
+}
+.${rootClass} .TH-user-name-theme-toolbar-actions button,
+.${rootClass} .TH-user-name-custom-toolbar-actions button {
+  min-height: 38px !important;
+  min-width: 0 !important;
+  width: 100% !important;
+  padding: 7px 8px !important;
+  white-space: nowrap !important;
+}
+.${rootClass} .TH-user-name-settings-footer {
+  display: flex !important;
+  justify-content: flex-end !important;
+  align-items: center !important;
+  gap: 10px !important;
+  flex: 0 0 auto !important;
+  padding: 12px 2px 0 !important;
+}
+.${rootClass} .TH-user-name-custom-toolbar {
+  display: grid !important;
+  grid-template-columns: minmax(180px, 280px) minmax(0, 1fr) !important;
+  gap: 8px 12px !important;
+  align-items: center !important;
+}
+.${rootClass} .TH-user-name-custom-toolbar-actions {
+  display: grid !important;
+  grid-template-columns: repeat(5, minmax(76px, 1fr)) !important;
+  gap: 6px !important;
+  align-items: center !important;
+}
+.${rootClass} .TH-user-name-custom-rule-toolbar {
+  display: block !important;
+  padding-top: 2px !important;
+}
+.${rootClass} .TH-user-name-custom-add-rule-row {
+  display: flex !important;
+  justify-content: flex-start !important;
+  padding-top: 2px !important;
+}
+.${rootClass} .TH-user-name-custom-add-rule-row button {
+  min-width: 150px !important;
+  min-height: 38px !important;
+}
+.${rootClass} .TH-user-name-custom-table-header {
+  position: sticky !important;
+  top: 0 !important;
+  z-index: 2 !important;
+  padding: 8px 6px !important;
+}
+.${rootClass} .TH-user-name-custom-rule-row {
+  padding: 7px 6px !important;
+  border-top: 1px solid color-mix(in srgb, currentColor 13%, transparent) !important;
+}
+.${rootClass} .TH-user-name-custom-field {
+  display: grid !important;
+  min-width: 0 !important;
+}
+.${rootClass} .TH-user-name-custom-mobile-label {
+  display: none !important;
+}
+.${rootClass} .TH-user-name-custom-input {
+  width: 100% !important;
+  min-width: 0 !important;
+  min-height: 40px !important;
+  max-height: 112px !important;
+  resize: none !important;
+  overflow: auto !important;
+  line-height: 1.45 !important;
+  white-space: pre-wrap !important;
+  overflow-wrap: anywhere !important;
 }
 .${rootClass} .TH-user-name-replace-modal-body > *,
 .${rootClass} .TH-user-name-replace-help-modal,
@@ -1604,7 +2098,31 @@ function buildSettingsOverlay(
   overflow-wrap: anywhere !important;
   word-break: break-word !important;
 }
-@media (max-width: 640px) {
+@media (max-width: 900px) {
+  .${rootClass} .TH-user-name-replace-modal {
+    width: min(760px, calc(100vw - 24px)) !important;
+    max-width: calc(100vw - 24px) !important;
+  }
+  .${rootClass} .TH-user-name-settings-overview {
+    grid-template-columns: minmax(0, 1fr) !important;
+  }
+  .${rootClass} .TH-user-name-settings-section-wide {
+    grid-column: auto !important;
+  }
+  .${rootClass} .TH-user-name-settings-floating .TH-user-name-settings-section-content {
+    grid-template-columns: minmax(0, 1fr) !important;
+  }
+  .${rootClass} .TH-user-name-theme-toolbar-actions {
+    grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
+  }
+  .${rootClass} .TH-user-name-custom-toolbar {
+    grid-template-columns: minmax(0, 1fr) !important;
+  }
+  .${rootClass} .TH-user-name-custom-toolbar-actions {
+    grid-template-columns: repeat(5, minmax(0, 1fr)) !important;
+  }
+}
+@media (max-width: 720px) {
   .${rootClass} .TH-user-name-replace-overlay,
   .${rootClass} .TH-user-name-replace-help-overlay {
     align-items: flex-start !important;
@@ -1614,8 +2132,107 @@ function buildSettingsOverlay(
     width: 100% !important;
     max-width: 100% !important;
     max-height: 100% !important;
-    border-radius: 18px !important;
-    padding: 14px 12px 12px !important;
+    border-radius: 16px !important;
+    padding: 12px 10px 10px !important;
+  }
+  .${rootClass} .TH-user-name-replace-modal-body {
+    gap: 8px !important;
+  }
+  .${rootClass} .TH-user-name-settings-section-chevron {
+    display: inline-block !important;
+  }
+  .${rootClass} .TH-user-name-settings-section-header {
+    cursor: pointer !important;
+  }
+  .${rootClass} .TH-user-name-settings-section.is-mobile-collapsed .TH-user-name-settings-section-content {
+    display: none !important;
+  }
+  .${rootClass} .TH-user-name-settings-section.is-mobile-collapsed .TH-user-name-settings-section-chevron {
+    transform: rotate(-90deg) !important;
+  }
+  .${rootClass} .TH-user-name-settings-floating .TH-user-name-settings-section-content {
+    grid-template-columns: minmax(0, 1fr) !important;
+  }
+  .${rootClass} .TH-user-name-settings-footer {
+    padding-top: 9px !important;
+  }
+  .${rootClass} .TH-user-name-settings-footer button {
+    flex: 1 1 0 !important;
+  }
+  .${rootClass} .TH-user-name-custom-toolbar {
+    grid-template-columns: minmax(0, 1fr) !important;
+  }
+  .${rootClass} .TH-user-name-custom-toolbar-actions {
+    grid-template-columns: repeat(6, minmax(0, 1fr)) !important;
+    width: 100% !important;
+  }
+  .${rootClass} .TH-user-name-custom-toolbar-actions button {
+    grid-column: span 2 !important;
+  }
+  .${rootClass} .TH-user-name-custom-toolbar-actions button:nth-child(4) {
+    grid-column: 2 / span 2 !important;
+  }
+  .${rootClass} .TH-user-name-custom-rule-count {
+    padding: 2px 4px !important;
+  }
+  .${rootClass} .TH-user-name-custom-add-rule-row {
+    width: 100% !important;
+  }
+  .${rootClass} .TH-user-name-custom-add-rule {
+    width: 100% !important;
+  }
+  .${rootClass} .TH-user-name-theme-toolbar-actions {
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+  }
+  .${rootClass} .TH-user-name-theme-palette-toggle {
+    width: 100% !important;
+  }
+  .${rootClass} .TH-user-name-custom-table-wrap {
+    overflow: visible !important;
+  }
+  .${rootClass} .TH-user-name-custom-table-header {
+    display: none !important;
+  }
+  .${rootClass} .TH-user-name-custom-rule-row {
+    display: grid !important;
+    grid-template-columns: minmax(0, 1fr) auto auto !important;
+    gap: 7px 9px !important;
+    min-width: 0 !important;
+    padding: 9px !important;
+    border: 1px solid color-mix(in srgb, currentColor 16%, transparent) !important;
+    border-radius: 13px !important;
+  }
+  .${rootClass} .TH-user-name-custom-field {
+    grid-column: 1 / -1 !important;
+    gap: 4px !important;
+  }
+  .${rootClass} .TH-user-name-custom-mobile-label {
+    display: block !important;
+    font-size: 11px !important;
+    font-weight: 700 !important;
+    opacity: .72 !important;
+  }
+  .${rootClass} .TH-user-name-custom-enabled-cell {
+    justify-self: start !important;
+    gap: 6px !important;
+  }
+  .${rootClass} .TH-user-name-custom-blur-cell {
+    grid-column: 2 !important;
+    justify-self: end !important;
+    justify-content: flex-end !important;
+    gap: 6px !important;
+  }
+  .${rootClass} .TH-user-name-custom-rule-row > .TH-user-name-custom-flat-button:last-child {
+    grid-column: 3 !important;
+    justify-self: end !important;
+  }
+  .${rootClass} .TH-user-name-custom-enabled-cell .TH-user-name-custom-mobile-label,
+  .${rootClass} .TH-user-name-custom-blur-cell .TH-user-name-custom-mobile-label {
+    display: inline !important;
+  }
+  .${rootClass} .TH-user-name-custom-input {
+    min-height: 38px !important;
+    max-height: 96px !important;
   }
   .${rootClass} .TH-user-name-replace-help-modal {
     width: 100% !important;
@@ -1675,12 +2292,12 @@ function buildSettingsOverlay(
   };
 
   const modalStyle: Partial<CSSStyleDeclaration> = {
-    width: 'min(720px, calc(100vw - 28px))',
-    maxWidth: 'calc(100vw - 28px)',
+    width: 'min(1120px, calc(100vw - 32px))',
+    maxWidth: 'calc(100vw - 32px)',
     margin: '0',
     borderRadius: '24px',
     padding: '18px 18px 16px',
-    maxHeight: 'calc(100dvh - 28px)',
+    maxHeight: 'calc(100dvh - 24px)',
     overflow: 'hidden',
     position: 'relative',
     display: 'flex',
@@ -1709,6 +2326,55 @@ function buildSettingsOverlay(
     padding: '12px 14px',
     display: 'grid',
     gap: '8px',
+  };
+
+  const createSettingsSection = (
+    title: string,
+    $container: any,
+    options: {
+      wide?: boolean;
+      mobileCollapsed?: boolean;
+      collapsible?: boolean;
+      defaultCollapsed?: boolean;
+      className?: string;
+    } = {},
+  ): { $section: any; $content: any } => {
+    const $section = registerSection(
+      p$('<section>')
+        .addClass('TH-user-name-settings-section')
+        .addClass(options.wide ? 'TH-user-name-settings-section-wide' : '')
+        .addClass(options.mobileCollapsed ? 'is-mobile-collapsed' : '')
+        .addClass(options.collapsible ? 'is-collapsible' : '')
+        .addClass(options.collapsible && options.defaultCollapsed ? 'is-collapsed' : '')
+        .addClass(options.className ?? '')
+        .css(sectionStyle)
+        .appendTo($container),
+    );
+    const $sectionHeader = p$('<div role="button" tabindex="0">')
+      .addClass('TH-user-name-settings-section-header')
+      .appendTo($section);
+    p$('<span>').addClass('TH-user-name-settings-section-title').text(title).appendTo($sectionHeader);
+    p$('<span aria-hidden="true">')
+      .addClass('TH-user-name-settings-section-chevron')
+      .text('⌄')
+      .appendTo($sectionHeader);
+    const $content = p$('<div>').addClass('TH-user-name-settings-section-content').appendTo($section);
+    const toggleSection = (): boolean => {
+      if (options.collapsible) {
+        $section.toggleClass('is-collapsed');
+        return true;
+      }
+      if (!pWin.matchMedia('(max-width: 720px)').matches) return false;
+      $section.toggleClass('is-mobile-collapsed');
+      return true;
+    };
+    $sectionHeader.on('click', toggleSection);
+    $sectionHeader.on('keydown', (event: KeyboardEvent) => {
+      if (event.key !== 'Enter' && event.key !== ' ') return;
+      if (!toggleSection()) return;
+      event.preventDefault();
+    });
+    return { $section, $content };
   };
 
   const $overlay = p$('<div>').addClass('TH-user-name-replace-overlay').css(overlayStyle).appendTo($root);
@@ -1797,6 +2463,20 @@ function buildSettingsOverlay(
   registerMeta('未开启“同步替换正文内容”时，只改变聊天页面的显示，不会修改聊天记录或发送给模型的提示词。', $helpModal);
   registerMeta('纯显示替换也会应用到正则美化生成的同源状态栏，只遮盖状态栏里的显示文字。', $helpModal);
   registerMeta('名字输入可用 ,、，、、、;、；、/ 或换行分隔多个词；替换项留空时，对应名字会从显示中消失。', $helpModal);
+  registerMeta(
+    '替换项支持安全的行内格式：*斜体*、**粗体**、***粗斜体***、`代码` 或 <code>代码</code>。其他 HTML 会按普通文字显示。',
+    $helpModal,
+  );
+  registerMeta('代码样式、代码块和独立的思维/推理内容区域中的名字也会参与显示替换。', $helpModal);
+  registerMeta('每条规则的“模糊”是独立显示效果，可与文字格式、图片组合使用，不会把模糊样式写进聊天正文。', $helpModal);
+  registerMeta(
+    '“遮盖消息标题名字”默认关闭；开启后只替换楼层顶部的用户名或角色名，不影响日期和标题栏按钮。',
+    $helpModal,
+  );
+  registerMeta(
+    '“替换回声小剧场”默认关闭；开启后只处理小剧场的角色标题和正文，不会修改工具栏、筛选器等控件。',
+    $helpModal,
+  );
 
   p$('<div>').text('正文同步替换').css({ 'font-weight': '700', 'margin-top': '4px' }).appendTo($helpModal);
   const $contentSyncWarning = p$('<div>')
@@ -1825,8 +2505,17 @@ function buildSettingsOverlay(
     $helpModal,
   );
 
-  const $globalSec = registerSection(p$('<div>').css(sectionStyle).appendTo($body));
-  p$('<div>').text('全局').css({ 'font-weight': '700' }).appendTo($globalSec);
+  const $overviewGrid = p$('<div>').addClass('TH-user-name-settings-overview').appendTo($body);
+  const { $content: $globalSec } = createSettingsSection('◉ 全局', $overviewGrid);
+  const { $content: $appearanceSec } = createSettingsSection('◈ 颜色与外观', $overviewGrid, {
+    mobileCollapsed: true,
+  });
+  const { $content: $floatingSec } = createSettingsSection('◇ 悬浮控件', $overviewGrid, {
+    wide: true,
+    collapsible: true,
+    defaultCollapsed: true,
+    className: 'TH-user-name-settings-floating',
+  });
 
   const $enabledRow = p$('<label>').css({ display: 'flex', gap: '8px', 'align-items': 'center' }).appendTo($globalSec);
   const $enabled = p$('<input type="checkbox">').appendTo($enabledRow);
@@ -1837,6 +2526,18 @@ function buildSettingsOverlay(
     .appendTo($globalSec);
   const $contentReplace = p$('<input type="checkbox">').appendTo($contentReplaceRow);
   p$('<span>').text('同步替换正文内容').appendTo($contentReplaceRow);
+
+  const $headerNamesRow = p$('<label>')
+    .css({ display: 'flex', gap: '8px', 'align-items': 'center' })
+    .appendTo($globalSec);
+  const $headerNames = p$('<input type="checkbox">').appendTo($headerNamesRow);
+  p$('<span>').text('遮盖消息标题名字').appendTo($headerNamesRow);
+
+  const $echoTheaterRow = p$('<label>')
+    .css({ display: 'flex', gap: '8px', 'align-items': 'center' })
+    .appendTo($globalSec);
+  const $echoTheater = p$('<input type="checkbox">').appendTo($echoTheaterRow);
+  p$('<span>').text('替换回声小剧场').appendTo($echoTheaterRow);
 
   registerMeta('替换显示模式', $globalSec);
   const displayModeGroupName = `th_user_name_replace_display_mode_${getScriptId()}`;
@@ -1865,8 +2566,8 @@ function buildSettingsOverlay(
   ).appendTo($displayImageAndTextRow);
   p$('<span>').text('图片+文字').appendTo($displayImageAndTextRow);
 
-  registerMeta('颜色模板', $globalSec);
-  const $themeSelect = registerInput(p$('<select>').css(inputStyle).appendTo($globalSec));
+  registerMeta('颜色模板', $appearanceSec);
+  const $themeSelect = registerInput(p$('<select>').css(inputStyle).appendTo($appearanceSec));
   THEME_PRESETS.forEach(theme => {
     p$('<option>').val(theme.key).text(theme.label).appendTo($themeSelect);
   });
@@ -1875,33 +2576,36 @@ function buildSettingsOverlay(
 
   const $customThemeSec = registerSection(
     p$('<div>')
+      .addClass('TH-user-name-theme-custom')
       .css({ ...sectionStyle, display: 'none' })
-      .appendTo($globalSec),
+      .appendTo($appearanceSec),
   );
   p$('<div>').text('自定义颜色').css({ 'font-weight': '700' }).appendTo($customThemeSec);
 
   const $themeToolbar = p$('<div>')
+    .addClass('TH-user-name-theme-toolbar')
     .css({ display: 'flex', gap: '8px', 'align-items': 'center', 'flex-wrap': 'wrap' })
     .appendTo($customThemeSec);
   const $themeProfileSelect = registerInput(
     p$('<select>')
-      .css({ ...inputStyle, width: 'min(260px, 100%)', flex: '1 1 180px' })
+      .css({ ...inputStyle, width: '100%' })
       .appendTo($themeToolbar),
   );
+  const $themeToolbarActions = p$('<div>').addClass('TH-user-name-theme-toolbar-actions').appendTo($themeToolbar);
   const $btnAddThemeProfile = registerFlatButton(
-    p$('<button type="button">').text('新').css(btnStyle).appendTo($themeToolbar),
+    p$('<button type="button">').text('＋ 新建').css(btnStyle).appendTo($themeToolbarActions),
   );
   const $btnRenameThemeProfile = registerFlatButton(
-    p$('<button type="button">').text('重').css(btnStyle).appendTo($themeToolbar),
+    p$('<button type="button">').text('重命名').css(btnStyle).appendTo($themeToolbarActions),
   );
   const $btnDeleteThemeProfile = registerFlatButton(
-    p$('<button type="button">').text('删').css(btnStyle).appendTo($themeToolbar),
+    p$('<button type="button">').text('删除').css(btnStyle).appendTo($themeToolbarActions),
   );
   const $btnImportTheme = registerFlatButton(
-    p$('<button type="button">').text('导入').css(btnStyle).appendTo($themeToolbar),
+    p$('<button type="button">').text('导入').css(btnStyle).appendTo($themeToolbarActions),
   );
   const $btnExportTheme = registerFlatButton(
-    p$('<button type="button">').text('导出').css(btnStyle).appendTo($themeToolbar),
+    p$('<button type="button">').text('导出').css(btnStyle).appendTo($themeToolbarActions),
   );
   const $themeImportFile = p$('<input type="file" accept="application/json,.json">')
     .css({ display: 'none' })
@@ -1909,7 +2613,8 @@ function buildSettingsOverlay(
 
   const $btnToggleThemePalette = registerFlatButton(
     p$('<button type="button">')
-      .text('色板 +')
+      .addClass('TH-user-name-theme-palette-toggle')
+      .text('编辑色板')
       .css({ ...btnStyle, justifySelf: 'start' })
       .appendTo($customThemeSec),
   );
@@ -1945,11 +2650,10 @@ function buildSettingsOverlay(
     );
   });
 
-  registerMeta('悬浮控件', $globalSec);
   const layoutGroupName = `th_user_name_replace_layout_${getScriptId()}`;
   const $layoutRow = p$('<div>')
     .css({ display: 'none', gap: '14px', 'align-items': 'center', 'flex-wrap': 'wrap' })
-    .appendTo($globalSec);
+    .appendTo($floatingSec);
   const $layoutVerticalRow = p$('<label>')
     .css({ display: 'flex', gap: '6px', 'align-items': 'center' })
     .appendTo($layoutRow);
@@ -1967,27 +2671,30 @@ function buildSettingsOverlay(
 
   const $collapseVisibleRow = p$('<label>')
     .css({ display: 'none', gap: '8px', 'align-items': 'center' })
-    .appendTo($globalSec);
+    .appendTo($floatingSec);
   const $collapseVisible = p$('<input type="checkbox">').appendTo($collapseVisibleRow);
   p$('<span>').text('旧版折叠按钮').appendTo($collapseVisibleRow);
 
+  const $floatingToggleGroup = p$('<div>').addClass('TH-user-name-floating-group').appendTo($floatingSec);
+  registerMeta('显示内容', $floatingToggleGroup).addClass('TH-user-name-floating-group-title');
   const $fabEnabledRow = p$('<label>')
     .css({ display: 'flex', gap: '8px', 'align-items': 'center' })
-    .appendTo($globalSec);
+    .appendTo($floatingToggleGroup);
   const $fabEnabled = p$('<input type="checkbox">').appendTo($fabEnabledRow);
   p$('<span>').text('显示悬浮窗').appendTo($fabEnabledRow);
 
   const $fabContentSyncVisibleRow = p$('<label>')
     .css({ display: 'flex', gap: '8px', 'align-items': 'center' })
-    .appendTo($globalSec);
+    .appendTo($floatingToggleGroup);
   const $fabContentSyncVisible = p$('<input type="checkbox">').appendTo($fabContentSyncVisibleRow);
   p$('<span>').text('显示“同步正文替换”快捷开关').appendTo($fabContentSyncVisibleRow);
 
-  registerMeta('悬浮控件位置', $globalSec);
+  const $floatingPositionGroup = p$('<div>').addClass('TH-user-name-floating-group').appendTo($floatingSec);
+  registerMeta('悬浮控件位置', $floatingPositionGroup).addClass('TH-user-name-floating-group-title');
   const dockSideGroupName = `th_user_name_replace_dock_side_${getScriptId()}`;
   const $dockSideRow = p$('<div>')
     .css({ display: 'flex', gap: '14px', 'align-items': 'center', 'flex-wrap': 'wrap' })
-    .appendTo($globalSec);
+    .appendTo($floatingPositionGroup);
   const $dockLeftRow = p$('<label>')
     .css({ display: 'flex', gap: '6px', 'align-items': 'center' })
     .appendTo($dockSideRow);
@@ -2001,11 +2708,12 @@ function buildSettingsOverlay(
 
   const $compactDockRow = p$('<label>')
     .css({ display: 'none', gap: '8px', 'align-items': 'center' })
-    .appendTo($globalSec);
+    .appendTo($floatingSec);
   const $compactDock = p$('<input type="checkbox">').appendTo($compactDockRow);
   p$('<span>').text('使用贴边小按钮模式').appendTo($compactDockRow);
 
   const $settingsActions = p$('<div>')
+    .addClass('TH-user-name-settings-footer')
     .css({
       display: 'flex',
       gap: '10px',
@@ -2013,7 +2721,7 @@ function buildSettingsOverlay(
       'align-items': 'center',
       'padding-top': '4px',
     })
-    .appendTo($globalSec);
+    .appendTo($modal);
   const $btnCancel = registerFlatButton(
     p$('<button type="button">').text('取消').css(btnStyle).appendTo($settingsActions),
   );
@@ -2022,10 +2730,10 @@ function buildSettingsOverlay(
     .css({ ...btnStyle, 'font-weight': '700' })
     .appendTo($settingsActions);
 
-  const $customSec = registerSection(p$('<div>').css(sectionStyle).appendTo($body));
-  p$('<div>').text('配置替换').css({ 'font-weight': '700' }).appendTo($customSec);
+  const { $content: $customSec } = createSettingsSection('▦ 配置替换', $body, { collapsible: true });
 
   const $customToolbar = p$('<div>')
+    .addClass('TH-user-name-custom-toolbar')
     .css({ display: 'flex', gap: '8px', 'align-items': 'center', 'flex-wrap': 'wrap' })
     .appendTo($customSec);
   const $profileSelect = registerInput(
@@ -2033,35 +2741,42 @@ function buildSettingsOverlay(
       .css({ ...inputStyle, width: 'min(260px, 100%)', flex: '1 1 180px' })
       .appendTo($customToolbar),
   );
+  const $customToolbarActions = p$('<div>').addClass('TH-user-name-custom-toolbar-actions').appendTo($customToolbar);
   const $btnAddProfile = registerFlatButton(
-    p$('<button type="button">').text('新').css(btnStyle).appendTo($customToolbar),
+    p$('<button type="button">').text('＋ 新建').css(btnStyle).appendTo($customToolbarActions),
   );
   const $btnRenameProfile = registerFlatButton(
-    p$('<button type="button">').text('重').css(btnStyle).appendTo($customToolbar),
+    p$('<button type="button">').text('重命名').css(btnStyle).appendTo($customToolbarActions),
   );
   const $btnDeleteProfile = registerFlatButton(
-    p$('<button type="button">').text('删').css(btnStyle).appendTo($customToolbar),
+    p$('<button type="button">').text('删除').css(btnStyle).appendTo($customToolbarActions),
   );
   const $btnImportCustom = registerFlatButton(
-    p$('<button type="button">').text('导入').css(btnStyle).appendTo($customToolbar),
+    p$('<button type="button">').text('导入').css(btnStyle).appendTo($customToolbarActions),
   );
   const $btnExportCustom = registerFlatButton(
-    p$('<button type="button">').text('导出').css(btnStyle).appendTo($customToolbar),
+    p$('<button type="button">').text('导出').css(btnStyle).appendTo($customToolbarActions),
   );
   const $customImportFile = p$('<input type="file" accept="application/json,.json">')
     .css({ display: 'none' })
     .appendTo($customSec);
 
+  const $customRuleToolbar = p$('<div>').addClass('TH-user-name-custom-rule-toolbar').appendTo($customSec);
+  const $ruleCount = p$('<span>')
+    .addClass('TH-user-name-custom-rule-count')
+    .css({ 'font-size': '12px', opacity: '0.72', alignSelf: 'center', padding: '0 4px' })
+    .appendTo($customRuleToolbar);
+
   const $customTableWrap = p$('<div>')
     .addClass('TH-user-name-custom-table-wrap')
-    .css({ overflowX: 'auto', maxWidth: '100%', minWidth: '0' })
+    .css({ overflow: 'visible', maxWidth: '100%', minWidth: '0' })
     .appendTo($customSec);
   const customGridStyle: Partial<CSSStyleDeclaration> = {
     display: 'grid',
-    gridTemplateColumns: '46px minmax(130px, 1fr) minmax(150px, 1.1fr) minmax(160px, 1.1fr) 44px',
-    gap: '6px',
+    gridTemplateColumns: '52px repeat(3, minmax(0, 1fr)) 56px 48px',
+    gap: '8px',
     alignItems: 'center',
-    minWidth: '620px',
+    minWidth: '0',
   };
   p$('<div>')
     .addClass('TH-user-name-custom-table-header')
@@ -2070,15 +2785,17 @@ function buildSettingsOverlay(
     .append(p$('<div>').text('名字'))
     .append(p$('<div>').text('替换项'))
     .append(p$('<div>').text('图片 URL'))
+    .append(p$('<div>').text('模糊'))
     .append(p$('<div>').text(''))
     .appendTo($customTableWrap);
   const $customRuleRows = p$('<div>').css({ display: 'grid', gap: '6px', marginTop: '6px' }).appendTo($customTableWrap);
-
+  const $customAddRuleRow = p$('<div>').addClass('TH-user-name-custom-add-rule-row').appendTo($customSec);
   const $btnAddRule = registerFlatButton(
     p$('<button type="button">')
-      .text('+')
-      .css({ ...btnStyle, width: '38px', justifySelf: 'start' })
-      .appendTo($customSec),
+      .addClass('TH-user-name-custom-add-rule')
+      .text('＋ 添加规则')
+      .css(btnStyle)
+      .appendTo($customAddRuleRow),
   );
 
   const readSelectedTheme = (): UiTheme => ($themeSelect.val() as UiTheme | undefined) ?? 'day';
@@ -2148,7 +2865,7 @@ function buildSettingsOverlay(
 
   const syncThemePaletteVisibility = () => {
     $customThemeGrid.css('display', customThemePaletteCollapsed ? 'none' : 'grid');
-    $btnToggleThemePalette.text(customThemePaletteCollapsed ? '色板 +' : '色板 -');
+    $btnToggleThemePalette.text(customThemePaletteCollapsed ? '编辑色板' : '收起色板');
   };
 
   const renderCustomThemeProfile = () => {
@@ -2209,6 +2926,7 @@ function buildSettingsOverlay(
           source: String($row.find('[data-custom-field="source"]').val() ?? ''),
           replacement_text: String($row.find('[data-custom-field="replacement_text"]').val() ?? ''),
           image_url: normalizeUrl(String($row.find('[data-custom-field="image_url"]').val() ?? '')),
+          blurred: $row.find('[data-custom-field="blurred"]').prop('checked'),
         };
       });
 
@@ -2225,45 +2943,98 @@ function buildSettingsOverlay(
     $profileSelect.val(activeCustomProfileId);
   };
 
+  const measureCustomRuleTextarea = (element: HTMLTextAreaElement, isMobile: boolean) => {
+    element.style.height = 'auto';
+    return clamp(element.scrollHeight + 2, isMobile ? 38 : 40, isMobile ? 96 : 112);
+  };
+
+  const resizeCustomRuleRow = ($row: any) => {
+    const textareas = $row.find('textarea.TH-user-name-custom-input').toArray() as HTMLTextAreaElement[];
+    const isMobile = pWin.matchMedia('(max-width: 720px)').matches;
+    const heights = textareas.map(element => measureCustomRuleTextarea(element, isMobile));
+    const sharedDesktopHeight = Math.max(40, ...heights);
+    textareas.forEach((element, index) => {
+      element.style.height = `${isMobile ? heights[index] : sharedDesktopHeight}px`;
+    });
+  };
+
+  const resizeAllCustomRuleTextareas = () => {
+    $customRuleRows.find('.TH-user-name-custom-rule-row').each((_idx: number, row: HTMLElement) => {
+      resizeCustomRuleRow(p$(row));
+    });
+  };
+
+  const refreshRuleCount = () => {
+    const count = $customRuleRows.find('.TH-user-name-custom-rule-row').length;
+    $ruleCount.text(`${count} 条规则`);
+  };
+
   const addCustomRuleRow = (rule: Partial<ReplacementRule> = {}) => {
     const $row = p$('<div>').addClass('TH-user-name-custom-rule-row').css(customGridStyle).appendTo($customRuleRows);
 
     const $enabledCell = p$('<label>')
+      .addClass('TH-user-name-custom-enabled-cell')
       .css({ display: 'flex', alignItems: 'center', justifyContent: 'center' })
       .appendTo($row);
     p$('<input type="checkbox">')
       .attr('data-custom-field', 'enabled')
       .prop('checked', rule.enabled ?? true)
       .appendTo($enabledCell);
-    p$('<input type="text" placeholder="Alice, Al, 艾丽丝">')
-      .addClass('TH-user-name-custom-input')
-      .attr('data-custom-field', 'source')
-      .val(rule.source ?? '')
-      .css({ ...inputStyle, minWidth: '0' })
+    p$('<span>').addClass('TH-user-name-custom-mobile-label').text('启用').appendTo($enabledCell);
+
+    const appendRuleTextField = (
+      label: string,
+      field: 'source' | 'replacement_text' | 'image_url',
+      placeholder: string,
+      value: string,
+    ) => {
+      const $field = p$('<label>').addClass('TH-user-name-custom-field').appendTo($row);
+      p$('<span>').addClass('TH-user-name-custom-mobile-label').text(label).appendTo($field);
+      const $textarea = p$('<textarea rows="1">')
+        .addClass('TH-user-name-custom-input')
+        .attr('data-custom-field', field)
+        .attr('placeholder', placeholder)
+        .val(value)
+        .css({ ...inputStyle, minWidth: '0' })
+        .appendTo($field);
+      $textarea.on('input', () => resizeCustomRuleRow($row));
+      return $textarea;
+    };
+
+    appendRuleTextField('名字', 'source', 'Alice, Al, 艾丽丝', String(rule.source ?? ''));
+    appendRuleTextField(
+      '替换项',
+      'replacement_text',
+      '**粗体** / *斜体* / <code>代码</code>',
+      String(rule.replacement_text ?? ''),
+    );
+    appendRuleTextField('图片 URL', 'image_url', 'https://...', String(rule.image_url ?? ''));
+
+    const $blurredCell = p$('<label>')
+      .addClass('TH-user-name-custom-blur-cell')
+      .attr('title', '对这一条规则的替换结果应用 4px 高斯模糊')
+      .css({ display: 'flex', alignItems: 'center', justifyContent: 'center' })
       .appendTo($row);
-    p$('<input type="text" placeholder="例如：匿名玩家">')
-      .addClass('TH-user-name-custom-input')
-      .attr('data-custom-field', 'replacement_text')
-      .val(rule.replacement_text ?? '')
-      .css({ ...inputStyle, minWidth: '0' })
-      .appendTo($row);
-    p$('<input type="text" placeholder="https://...">')
-      .addClass('TH-user-name-custom-input')
-      .attr('data-custom-field', 'image_url')
-      .val(rule.image_url ?? '')
-      .css({ ...inputStyle, minWidth: '0' })
-      .appendTo($row);
+    p$('<input type="checkbox">')
+      .attr('data-custom-field', 'blurred')
+      .prop('checked', rule.blurred ?? false)
+      .appendTo($blurredCell);
+    p$('<span>').addClass('TH-user-name-custom-mobile-label').text('模糊').appendTo($blurredCell);
 
     const $delete = p$('<button type="button">')
       .addClass('TH-user-name-custom-flat-button')
-      .text('删')
-      .css({ ...btnStyle, width: '38px', minWidth: '38px', padding: '8px 0' })
+      .attr({ title: '删除这条规则', 'aria-label': '删除这条规则' })
+      .text('删除')
+      .css({ ...btnStyle, width: '48px', minWidth: '48px', padding: '8px 0' })
       .appendTo($row);
     $delete.on('click', () => {
       $row.remove();
       if ($customRuleRows.find('.TH-user-name-custom-rule-row').length === 0) addCustomRuleRow();
+      refreshRuleCount();
       applyTheme(readSelectedTheme(), readCustomThemeColors());
     });
+    refreshRuleCount();
+    pWin.requestAnimationFrame(resizeAllCustomRuleTextareas);
   };
 
   const renderCustomRules = () => {
@@ -2271,6 +3042,7 @@ function buildSettingsOverlay(
     $customRuleRows.empty();
     const rules = profile.rules.length > 0 ? profile.rules : getDefaultProfileRules();
     rules.forEach(rule => addCustomRuleRow(rule));
+    refreshRuleCount();
     syncProfileSelect();
   };
 
@@ -2307,6 +3079,7 @@ function buildSettingsOverlay(
 ${scopedRoot} select,
 ${scopedRoot} input[type="text"],
 ${scopedRoot} input[type="color"],
+${scopedRoot} textarea,
 ${scopedRoot} button {
   box-sizing: border-box !important;
   font-family: inherit !important;
@@ -2316,25 +3089,68 @@ ${scopedRoot} button {
 ${scopedRoot} select,
 ${scopedRoot} input[type="text"],
 ${scopedRoot} input[type="color"],
+${scopedRoot} textarea,
 ${scopedRoot} .TH-user-name-custom-input {
   border: 1px solid ${palette.lineColor} !important;
   background: ${palette.noteBg} !important;
   color: ${palette.textMain} !important;
   box-shadow: inset 0 1px 0 ${palette.bgPaper} !important;
 }
-${scopedRoot} input[type="checkbox"],
+${scopedRoot} input[type="checkbox"] {
+  position: static !important;
+  appearance: none !important;
+  -webkit-appearance: none !important;
+  display: inline-block !important;
+  flex: 0 0 17px !important;
+  width: 17px !important;
+  height: 17px !important;
+  min-width: 17px !important;
+  min-height: 17px !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  opacity: 1 !important;
+  visibility: visible !important;
+  pointer-events: auto !important;
+  vertical-align: middle !important;
+  border: 1.5px solid ${palette.lineColor} !important;
+  border-radius: 4px !important;
+  background-color: ${palette.noteBg} !important;
+  background-image: none !important;
+  background-position: center !important;
+  background-repeat: no-repeat !important;
+  background-size: 12px 12px !important;
+  box-shadow: inset 0 1px 1px ${palette.shadowColor} !important;
+  transform: none !important;
+  filter: none !important;
+}
+${scopedRoot} input[type="checkbox"]:checked {
+  border-color: ${palette.accentColor} !important;
+  background-color: ${palette.accentColor} !important;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M3.2 8.2 6.4 11.2 12.8 4.8' fill='none' stroke='white' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") !important;
+}
+${scopedRoot} input[type="checkbox"]:focus-visible {
+  outline: 2px solid ${palette.accentColor} !important;
+  outline-offset: 2px !important;
+}
 ${scopedRoot} input[type="radio"] {
   position: static !important;
   appearance: auto !important;
   -webkit-appearance: auto !important;
-  width: auto !important;
-  height: auto !important;
-  min-width: 0 !important;
-  min-height: 0 !important;
+  display: inline-block !important;
+  flex: 0 0 15px !important;
+  width: 15px !important;
+  height: 15px !important;
+  min-width: 15px !important;
+  min-height: 15px !important;
   margin: 0 !important;
   opacity: 1 !important;
+  visibility: visible !important;
   pointer-events: auto !important;
   vertical-align: middle !important;
+  background-image: none !important;
+  transform: none !important;
+  filter: none !important;
+  accent-color: ${palette.accentColor} !important;
 }
 ${scopedRoot} label {
   width: auto !important;
@@ -2388,6 +3204,15 @@ ${scopedRoot} button {
       color: palette.textMain,
       boxShadow: `inset 0 1px 0 ${palette.bgPaper}`,
     });
+    $root.find('.TH-user-name-custom-table-header').css({
+      background: palette.bgPaperDark,
+      color: palette.textMain,
+      borderBottom: `1px solid ${palette.lineColor}`,
+    });
+    $root.find('.TH-user-name-custom-rule-row').css({
+      background: rgbaFromCssColor(palette.noteBg, 0.56, pDoc),
+    });
+    $settingsActions.css('border-top', `1px dashed ${palette.lineColor}`);
 
     flatButtons.forEach($button => {
       $button.css({
@@ -2423,6 +3248,8 @@ ${scopedRoot} button {
     const s = getSettings();
     $enabled.prop('checked', s.enabled);
     $contentReplace.prop('checked', s.replace_message_content);
+    $headerNames.prop('checked', s.replace_message_header_names);
+    $echoTheater.prop('checked', s.replace_echo_theater);
     const displayMode = getDisplayReplaceMode(s);
     $displayTextOnly.prop('checked', displayMode === 'text_only');
     $displayImageOnly.prop('checked', displayMode === 'image_only');
@@ -2454,6 +3281,7 @@ ${scopedRoot} button {
     syncCustomThemeVisibility();
     applyTheme(s.ui_theme, getActiveThemeDraftProfile().colors);
     $overlay.addClass('TH-user-name-replace-open');
+    pWin.requestAnimationFrame(resizeAllCustomRuleTextareas);
   };
 
   const save = () => {
@@ -2476,6 +3304,8 @@ ${scopedRoot} button {
       ...current,
       enabled: $enabled.prop('checked'),
       replace_message_content: $contentReplace.prop('checked'),
+      replace_message_header_names: $headerNames.prop('checked'),
+      replace_echo_theater: $echoTheater.prop('checked'),
       image_replace_whole_word: display_replace_mode === 'image_only',
       display_replace_mode,
       ui_theme: readSelectedTheme(),
@@ -2708,6 +3538,9 @@ ${scopedRoot} button {
     },
   );
 
+  const settingsResizeNamespace = `.TH_user_name_replace_settings_${getScriptId()}`;
+  p$(pWin).on(`resize${settingsResizeNamespace}`, resizeAllCustomRuleTextareas);
+
   p$(pDoc).on(`keydown.TH_user_name_replace_${getScriptId()}`, (e: any) => {
     if (e.key !== 'Escape') return;
     if ($helpOverlay.css('display') !== 'none') {
@@ -2720,6 +3553,7 @@ ${scopedRoot} button {
   return {
     open,
     destroy: () => {
+      p$(pWin).off(`resize${settingsResizeNamespace}`);
       p$(pDoc).off(`keydown.TH_user_name_replace_${getScriptId()}`);
       $priorityStyle.remove();
       $layoutStyle.remove();
@@ -3403,11 +4237,51 @@ function init() {
   let destroyed = false;
   const parent$ = (window.parent as any).$ ?? $;
   const pWin = window.parent ?? window;
+  const pDoc = pWin.document ?? document;
+  const echoTheaterEnhancer = createEchoTheaterEnhancer(getSettings, pDoc, pWin);
   const ParentIntersectionObserver = (pWin as any).IntersectionObserver as typeof IntersectionObserver | undefined;
+  const ParentMutationObserver = (pWin as any).MutationObserver as typeof MutationObserver | undefined;
   const pendingDisplayedMessageRefreshIds = new Set<number>();
   const observedDisplayedMessageElements = new Map<number, Element>();
   let displayedMessageRefreshChain = Promise.resolve();
   let displayedMessageObserver: IntersectionObserver | null = null;
+  let nestedMessageIframeMountObserver: MutationObserver | null = null;
+
+  const collectMountedMessageIframes = (node: Node, frames: Set<HTMLIFrameElement>) => {
+    if (node.nodeType !== 1) return;
+    const element = node as Element;
+    if (element.tagName === 'IFRAME') frames.add(element as HTMLIFrameElement);
+    element.querySelectorAll<HTMLIFrameElement>('iframe').forEach(frame => frames.add(frame));
+  };
+
+  const applyToNewlyMountedMessageIframes = (frames: Iterable<HTMLIFrameElement>) => {
+    if (destroyed) return;
+
+    const messages = new Set<HTMLElement>();
+    for (const frame of frames) {
+      if (!frame.closest('.mes_text, .mes_reasoning')) continue;
+      const message = frame.closest<HTMLElement>('#chat > .mes');
+      if (message) messages.add(message);
+    }
+    if (messages.size === 0) return;
+
+    const settings = getSettings();
+    const matcher = compileMatcher(buildRules(settings));
+    messages.forEach(message => {
+      applyToNestedMessageIframes(parent$(message), matcher, settings);
+    });
+  };
+
+  if (ParentMutationObserver && pDoc.body) {
+    nestedMessageIframeMountObserver = new ParentMutationObserver(mutations => {
+      const frames = new Set<HTMLIFrameElement>();
+      mutations.forEach(mutation => {
+        mutation.addedNodes.forEach(node => collectMountedMessageIframes(node, frames));
+      });
+      applyToNewlyMountedMessageIframes(frames);
+    });
+    nestedMessageIframeMountObserver.observe(pDoc.body, { childList: true, subtree: true });
+  }
 
   const clearPendingDisplayedMessageRefresh = (message_id: number) => {
     pendingDisplayedMessageRefreshIds.delete(message_id);
@@ -3479,6 +4353,7 @@ function init() {
     }
     queueChangedDisplayedMessagesForRefresh(patches);
     applyToAllVisible(s);
+    echoTheaterEnhancer.reapply();
   };
 
   const pendingMessageIds = new Set<number>();
@@ -3673,7 +4548,10 @@ function init() {
     for (const stop of stopList) stop();
     pendingMessageIds.clear();
     clearAllPendingDisplayedMessageRefreshes();
+    nestedMessageIframeMountObserver?.disconnect();
+    nestedMessageIframeMountObserver = null;
     destroyNestedIframeDisplayEnhancements(true);
+    echoTheaterEnhancer.destroy(true);
     restoreAll();
     destroyFloatingUi();
     $(window).off(`pagehide${pagehideNs}`);

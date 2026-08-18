@@ -4,7 +4,7 @@
   "name": "用户名替换脚本（自动更新）",
   "id": "a37f3288-3050-450e-aed8-81816abf8dbd",
   "content": "import 'https://cdn.jsdelivr.net/gh/ClameCyrus/tavern-chat-bubbles/dist/用户名替换脚本/index.js';",
-  "info": "自动更新加载器。当前仓库初始版本：V1.98.2。实际代码从 GitHub + cdn.jsdelivr.net 加载。\n- 作者: ClameCyrus\n",
+  "info": "自动更新加载器。当前仓库版本：V2.0。实际代码从 GitHub + cdn.jsdelivr.net 加载。\n- 作者: ClameCyrus\n",
   "button": {
     "enabled": true,
     "buttons": []
