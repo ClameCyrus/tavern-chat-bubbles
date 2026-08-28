@@ -28,6 +28,7 @@ export interface NpcAlias {
 export interface AppearanceConfig {
   user_avatar: string;
   char_avatar: string;
+  npc_avatar: string;
   npc_avatars: NamedImage[];
   accent_dark: string;
   accent2_dark: string;
@@ -72,6 +73,7 @@ export function createDefaultAppearanceConfig(): AppearanceConfig {
   return {
     user_avatar: '',
     char_avatar: '',
+    npc_avatar: '',
     npc_avatars: [],
     accent_dark: '#57a3c9',
     accent2_dark: '#c9a45c',
@@ -179,6 +181,7 @@ export function normalizeAppearanceConfig(input: unknown): AppearanceConfig {
   return {
     user_avatar: asString(wrapped.user_avatar),
     char_avatar: asString(wrapped.char_avatar),
+    npc_avatar: asString(wrapped.npc_avatar),
     npc_avatars: npcAvatars,
     accent_dark: asString(wrapped.accent_dark, defaults.accent_dark),
     accent2_dark: asString(wrapped.accent2_dark, defaults.accent2_dark),
@@ -264,6 +267,7 @@ export function parseAppearanceConfigText(text: string): AppearanceConfig {
     switch (lower) {
       case 'user_avatar': model.user_avatar = value; break;
       case 'char_avatar': model.char_avatar = value; break;
+      case 'npc_avatar': model.npc_avatar = value; break;
       case 'accent_dark': model.accent_dark = value; break;
       case 'accent2_dark': model.accent2_dark = value; break;
       case 'accent_light': model.accent_light = value; break;
@@ -314,6 +318,7 @@ export function serializeAppearanceConfigText(input: AppearanceConfig, templateV
     '# 一、头像（可填写网络链接或面板生成的本地图片 data URL）',
     `user_avatar = ${cleanLine(model.user_avatar)}`,
     `char_avatar = ${cleanLine(model.char_avatar)}`,
+    `npc_avatar = ${cleanLine(model.npc_avatar)}`,
   ];
 
   for (const item of model.npc_avatars) {

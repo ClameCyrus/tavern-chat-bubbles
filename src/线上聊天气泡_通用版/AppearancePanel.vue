@@ -207,7 +207,7 @@ function bubbleStyle(actor: AppearanceActor): Record<string, string> {
 function avatarFor(actor: AppearanceActor): string {
   if (actor === 'user') return config.value.user_avatar;
   if (actor === 'char') return config.value.char_avatar;
-  return config.value.npc_avatars[0]?.url || '';
+  return config.value.npc_avatars[0]?.url || config.value.npc_avatar;
 }
 
 function decoFor(actor: AppearanceActor, corner: DecoCorner): string {
@@ -323,9 +323,10 @@ onUnmounted(() => {
           <div class="fhbc-section-body">
             <ImageField v-model="config.user_avatar" label="玩家头像" @error="text => notify(text, 'error')" />
             <ImageField v-model="config.char_avatar" label="主角色头像" @error="text => notify(text, 'error')" />
+            <ImageField v-model="config.npc_avatar" label="NPC 通用头像（单独头像未设置时使用；留空则显示名字）" @error="text => notify(text, 'error')" />
             <article class="fhbc-subcard">
-              <div class="fhbc-row-head"><h3>NPC 头像</h3><button type="button" class="fhbc-mini-button" @click="addNpcAvatar">＋ 添加 NPC</button></div>
-              <div v-if="!config.npc_avatars.length" class="fhbc-empty">尚未设置 NPC 头像。</div>
+              <div class="fhbc-row-head"><h3>NPC 单独头像</h3><button type="button" class="fhbc-mini-button" @click="addNpcAvatar">＋ 添加 NPC</button></div>
+              <div v-if="!config.npc_avatars.length" class="fhbc-empty">尚未设置 NPC 单独头像。</div>
               <div v-for="(item, index) in config.npc_avatars" :key="index" class="fhbc-dynamic-row">
                 <input v-model="item.name" class="fhbc-input fhbc-name-input" placeholder="NPC 名称" />
                 <ImageField v-model="item.url" :label="item.name || `NPC ${index + 1}`" @error="text => notify(text, 'error')" />

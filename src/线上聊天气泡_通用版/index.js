@@ -7,8 +7,9 @@ import {
 } from './appearance-config';
 
 // ============================================================
-// 线上聊天气泡_通用版 v15.5
-// 变更：语音/表情装饰锚定本体；可关闭 image 自动生图；移动端折叠操作改为紧凑组合
+// 线上聊天气泡_通用版 v15.6
+// 变更：新增 NPC 通用头像，作为未设置单独头像的 NPC 的兜底；均留空时使用名字文字头像
+// v15.5：语音/表情装饰锚定本体；可关闭 image 自动生图；移动端折叠操作改为紧凑组合
 // v15.4：修复移动端标题/系统时间/文件名排版；图片装饰改为锚定相框；取图失败显示关键词
 // v15.3：外观配置与可视化面板新增气泡整体缩放、字号、内边距、宽度、头像和消息间距设置
 // v15.2：用户名替换在气泡渲染后自动补应用；消息编辑完成后可靠重渲染；用户气泡内文字左对齐
@@ -29,13 +30,14 @@ const FHB_STYLE_ID = 'fhb-style-chatbubble';
 const FHB_MESSAGE_RENDERED_EVENT = 'fhb_message_rendered';
 
 function initChatBubbles() {
-    const CONF_VERSION = 'v15.5';
+    const CONF_VERSION = 'v15.6';
 
     const CONFIG = {
         // —— 以下带 * 的项均可被世界书「外观配置」条目覆盖，注释掉即回退到此处默认 ——
         USER_AVATAR: '',        // *
         CHAR_AVATAR: '',        // *
-        NPC_AVATARS: {},        // *
+        NPC_AVATAR: '',         // * 未设置单独头像的 NPC 共用；留空时显示名字文字头像
+        NPC_AVATARS: {},        // * npc.<名字> 单独头像，优先于通用头像
         NPC_ALIASES: {},        // * npc_aliases.<标准名> = 别名1, 别名2
 
         ACCENT_DARK: '',        // *
@@ -92,7 +94,7 @@ function initChatBubbles() {
 
     // 出厂快照：用于「注释掉配置即回退」
     const CONFIGURABLE_KEYS = [
-        'USER_AVATAR', 'CHAR_AVATAR', 'NPC_AVATARS', 'NPC_ALIASES',
+        'USER_AVATAR', 'CHAR_AVATAR', 'NPC_AVATAR', 'NPC_AVATARS', 'NPC_ALIASES',
         'ACCENT_DARK', 'ACCENT_LIGHT', 'ACCENT2_DARK', 'ACCENT2_LIGHT',
         'CHAR_EXTRA_ALIASES', 'DECO', 'DECO_SIZE', 'DECO_OFFSET', 'BUBBLE', 'LAYOUT',
         'STICKER_SIZE', 'IMAGE_AUTO_GENERATE', 'theme', 'imgW', 'imgH', 'collapseMin', 'STREAM_MODE'
@@ -372,7 +374,7 @@ function initChatBubbles() {
                 if (c.includes(lk) || lk.includes(c)) return tbl[k];
             }
         }
-        return '';
+        return String(CONFIG.NPC_AVATAR || '').trim();
     }
 
     function resolveContext() {
@@ -608,9 +610,10 @@ function initChatBubbles() {
 
 user_avatar =
 char_avatar =
+npc_avatar =
 
-# NPC 头像：键名是 npc. 加上角色在聊天记录里的名字。
-# 没配置的 NPC 会自动生成一个带首字母的渐变色头像。
+# NPC 单独头像：键名是 npc. 加上角色在聊天记录里的名字，优先于 npc_avatar。
+# npc_avatar 是没有单独头像的 NPC 共用的兜底头像；它也留空时显示按名字生成的文字头像。
 # 示例（删掉 # 才生效）：
 # npc.Julian = https://你的图床/julian.png
 # npc.Mara = https://你的图床/mara.png
@@ -1440,6 +1443,7 @@ stream_mode = defer`;
         const simple = {
             user_avatar: 'USER_AVATAR',
             char_avatar: 'CHAR_AVATAR',
+            npc_avatar: 'NPC_AVATAR',
             accent_dark: 'ACCENT_DARK',
             accent2_dark: 'ACCENT2_DARK',
             accent_light: 'ACCENT_LIGHT',
