@@ -1891,6 +1891,8 @@ stream_mode = defer`;
     '\\[(' + CONFIG.types.join('|') + ')\\|([^\\[\\]|]*\\|[^\\[\\]|]*\\|[^\\[\\]]*?)\\]',
     'gi',
   );
+  // typing 不依赖内容字段；兼容 AI 偶尔省略后置内容/时间的短格式。
+  const SHORT_TYPING_RE = /\[(typing)\|([^|\u005B\u005D]*)\|([^|\u005B\u005D]*)\]/gi;
   const TIME_RE = /^(\d{1,2}[:：]\d{2}(?::\d{2})?(\s?[APap]\.?[Mm]\.?)?|\d{4}[.\/-]\d{1,2}[.\/-]\d{1,2}.*)$/;
 
   function buildEntry(type, restRaw, idx, groupNames, noAnim) {
@@ -1964,6 +1966,7 @@ stream_mode = defer`;
 
     h = h.replace(/<span\b[^>]*?data-th-user-name-original="([^"]*)"[^>]*>[\s\S]*?<\/span>/gi, '$1');
     h = h.replace(/<span\b[^>]*class="[^"]*\bTH-user-name-replace-flow\b[^"]*"[^>]*>([\s\S]*?)<\/span>/gi, '$1');
+    h = h.replace(SHORT_TYPING_RE, '[$1|$2|$3|]');
 
     let prev = '';
     let loop = 0;
@@ -2883,14 +2886,30 @@ stream_mode = defer`;
     if (tavern_events.MESSAGE_EDITED) {
       eventOn(tavern_events.MESSAGE_EDITED, id => scheduleRenderAfterEditing(id, 0));
     }
+
+    const forceRenderFinishedMessage = (id, delay = 80) => {
+      GEN.active = false;
+      if (GEN.timer) {
+        clearTimeout(GEN.timer);
+        GEN.timer = null;
+      }
+      if (GEN.poller) {
+        clearInterval(GEN.poller);
+        GEN.poller = null;
+      }
+      setTimeout(() => {
+        resolveContext();
+        processById(id, { force: true });
+        restickerAll();
+        applyDecos();
+      }, delay);
+    };
+
     if (tavern_events.MESSAGE_SWIPED) {
-      eventOn(tavern_events.MESSAGE_SWIPED, id =>
-        setTimeout(() => {
-          resolveContext();
-          processById(id);
-          restickerAll();
-        }, 80),
-      );
+      eventOn(tavern_events.MESSAGE_SWIPED, id => forceRenderFinishedMessage(id));
+    }
+    if (tavern_events.CHARACTER_MESSAGE_RENDERED) {
+      eventOn(tavern_events.CHARACTER_MESSAGE_RENDERED, id => forceRenderFinishedMessage(id, 60));
     }
     if (tavern_events.CHAT_CHANGED) {
       let chatTimer = null;
