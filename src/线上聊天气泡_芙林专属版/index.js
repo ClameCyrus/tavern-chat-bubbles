@@ -595,7 +595,7 @@ function initFlynnChatBubbles() {
 - 时间统一使用 24 小时制 HH:MM，如 23:14。
 - 发送方写法：{{user}}一方写 {{user}}；其余一律写该角色的名字（与剧情中的称呼一致）。
 - 接收方写法：发给{{user}}时写 {{user}}；发给其他角色写对方名字；群聊写固定群名。
-- text 类型的语言风格遵循角色卡自身设定（如角色卡要求双语台词，则照旧成对写入内容字段）。
+- text 类型的内容保留双语规则：英文原句（中文翻译）成对写入内容字段。
 
 【类型语义】
 - text：内容为消息文本；附加可写状态词（已读/未读/送达失败），无则留空。
@@ -612,19 +612,27 @@ function initFlynnChatBubbles() {
 
 【输出示例】（名字仅为格式演示，实际输出使用剧情中的真实角色名）
 
-[text|芙林|{{user}}|你在哪里？楼下风很大。|已读|23:14]
+[text|Flynn|{{user}}|Wake up. I'm downstairs and it's freezing.（醒醒。我在你楼下，冻死了。）|已读|23:14]
 
-[sticker|{{user}}|芙林|🙄|翻个大白眼|23:15]
+[sticker|{{user}}|Flynn|🙄|翻个大白眼|23:15]
 
-[typing|芙林|{{user}}|23:16]
+[typing|Flynn|{{user}}|23:16]
 
-[text|Robin|Mika|明天老地方，别迟到。|已读|21:07]
+[text|Flynn|Teddy|Teddy. Party's dead without me, I'm aware.（泰迪。场子没我肯定凉了，不用说。）|已读|21:07]
 
-[system|Robin||Robin 邀请 Mika 加入了群聊|22:03]
+[sticker|Teddy|Flynn|🥳|Red is back!!!|21:08]
 
-[redpacket|Robin|周末小队|恭贺乔迁！|待领取|22:04]
+[call|Celia|Flynn|未接听|语音通话|21:41]
 
-[image|Mika|周末小队|凌晨三点的吧台只剩霓虹还亮着|bar,neon,night|22:07]
+[system|Teddy||Teddy 邀请 Mara 加入了群聊|22:03]
+
+[redpacket|Teddy|本周赢家|欢迎 Red 回家！|待领取|22:04]
+
+[text|Teddy|本周赢家|Red said yes!! Someone screenshot this.（Red答应了！！谁来截个图留念。）|22:05]
+
+[image|Mara|本周赢家|凌晨三点的吧台只剩霓虹还亮着|bar,neon,night|22:07]
+
+[text|Flynn|本周赢家|Save me a seat by the good bottles.（好酒旁边给我留个位置。）|已读|22:08]
 </party_chat_format>`;
 
   const STICKER_LIB_DEFAULT = `# ============================================
