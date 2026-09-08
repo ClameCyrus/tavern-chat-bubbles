@@ -15,6 +15,8 @@ type CustomProfile = {
   id: string;
   name: string;
   rules: ReplacementRule[];
+  binding_type: 'char' | 'user' | null;
+  binding_name: string;
 };
 
 type CustomSettingsExport = {
@@ -174,6 +176,8 @@ const CustomProfileSchema = z.object({
   id: z.string().default(''),
   name: z.string().default(''),
   rules: z.array(ReplacementRuleSchema).default([]),
+  binding_type: z.enum(['char', 'user']).nullable().default(null),
+  binding_name: z.string().default(''),
 });
 
 const CustomThemeProfileSchema = z.object({
@@ -705,6 +709,8 @@ function normalizeCustomProfiles(profiles: CustomProfile[], legacyRaw: string): 
       id,
       name: parsed.name.trim() || `配置${index + 1}`,
       rules: orderProfileRules(parsed.rules),
+      binding_type: parsed.binding_type,
+      binding_name: parsed.binding_name.trim(),
     });
   });
 
@@ -716,6 +722,8 @@ function normalizeCustomProfiles(profiles: CustomProfile[], legacyRaw: string): 
       id: DEFAULT_CUSTOM_PROFILE_ID,
       name: '配置1',
       rules: legacyRules.length > 0 ? legacyRules : getDefaultProfileRules(),
+      binding_type: null,
+      binding_name: '',
     },
   ];
 }
@@ -727,6 +735,17 @@ function normalizeCustomProfilesForSettings(settings: Settings): CustomProfile[]
 
 function getActiveCustomProfile(settings: Settings): CustomProfile {
   const profiles = normalizeCustomProfilesForSettings(settings);
+  const currentChar = getCharName();
+  const currentUser = getUserName();
+  // 角色绑定比用户绑定更具体；两者同时匹配时优先采用角色配置。
+  const boundProfile =
+    (currentChar
+      ? profiles.find(profile => profile.binding_type === 'char' && profile.binding_name === currentChar)
+      : undefined) ??
+    (currentUser
+      ? profiles.find(profile => profile.binding_type === 'user' && profile.binding_name === currentUser)
+      : undefined);
+  if (boundProfile) return boundProfile;
   return profiles.find(profile => profile.id === settings.active_custom_profile_id) ?? profiles[0];
 }
 
@@ -2734,7 +2753,7 @@ function buildSettingsOverlay(
 
   const $customToolbar = p$('<div>')
     .addClass('TH-user-name-custom-toolbar')
-    .css({ display: 'flex', gap: '8px', 'align-items': 'center', 'flex-wrap': 'wrap' })
+    .css({ display: 'flex', gap: '8px', 'align-items': 'center', 'flex-wrap': 'wrap', position: 'relative' })
     .appendTo($customSec);
   const $profileSelect = registerInput(
     p$('<select>')
@@ -2750,6 +2769,43 @@ function buildSettingsOverlay(
   );
   const $btnDeleteProfile = registerFlatButton(
     p$('<button type="button">').text('删除').css(btnStyle).appendTo($customToolbarActions),
+  );
+  const $bindingControl = p$('<div>').css({ position: 'relative' }).appendTo($customToolbarActions);
+  const $btnBindProfile = registerFlatButton(
+    p$('<button type="button">')
+      .attr({ 'aria-haspopup': 'menu', 'aria-expanded': 'false' })
+      .css(btnStyle)
+      .appendTo($bindingControl),
+  );
+  const $bindingMenu = p$('<div>')
+    .attr({ role: 'menu', 'aria-label': '配置绑定角色' })
+    .css({
+      display: 'none',
+      position: 'absolute',
+      right: '0',
+      top: 'calc(100% + 6px)',
+      zIndex: '4',
+      minWidth: '210px',
+      padding: '6px',
+      borderRadius: '8px',
+      boxShadow: '0 10px 28px rgba(0,0,0,.22)',
+    })
+    .appendTo($bindingControl);
+  const $btnBindChar = registerFlatButton(
+    p$('<button type="button" role="menuitem">')
+      .css({ ...btnStyle, width: '100%', justifyContent: 'flex-start' })
+      .appendTo($bindingMenu),
+  );
+  const $btnBindUser = registerFlatButton(
+    p$('<button type="button" role="menuitem">')
+      .css({ ...btnStyle, width: '100%', justifyContent: 'flex-start' })
+      .appendTo($bindingMenu),
+  );
+  const $btnUnbindProfile = registerFlatButton(
+    p$('<button type="button" role="menuitem">')
+      .text('解除绑定')
+      .css({ ...btnStyle, width: '100%', justifyContent: 'flex-start' })
+      .appendTo($bindingMenu),
   );
   const $btnImportCustom = registerFlatButton(
     p$('<button type="button">').text('导入').css(btnStyle).appendTo($customToolbarActions),
@@ -2909,7 +2965,13 @@ function buildSettingsOverlay(
       return profile;
     }
 
-    profile = { id: DEFAULT_CUSTOM_PROFILE_ID, name: '配置1', rules: getDefaultProfileRules() };
+    profile = {
+      id: DEFAULT_CUSTOM_PROFILE_ID,
+      name: '配置1',
+      rules: getDefaultProfileRules(),
+      binding_type: null,
+      binding_name: '',
+    };
     customProfileDrafts = [profile];
     activeCustomProfileId = profile.id;
     return profile;
@@ -2941,6 +3003,26 @@ function buildSettingsOverlay(
       p$('<option>').val(profile.id).text(profile.name).appendTo($profileSelect);
     });
     $profileSelect.val(activeCustomProfileId);
+  };
+
+  const closeBindingMenu = () => {
+    $bindingMenu.hide();
+    $btnBindProfile.attr('aria-expanded', 'false');
+  };
+
+  const refreshBindingControl = () => {
+    const profile = getActiveDraftProfile();
+    const bindingLabel = profile.binding_type === 'char' ? '角色' : profile.binding_type === 'user' ? '用户' : '';
+    $btnBindProfile.text(profile.binding_type ? `🔗 ${bindingLabel}：${profile.binding_name}` : '🔗 绑定角色');
+    $btnBindProfile.attr(
+      'title',
+      profile.binding_type
+        ? `当前配置会在${bindingLabel}“${profile.binding_name}”出现时自动启用`
+        : '将当前配置绑定到当前角色或当前用户',
+    );
+    $btnBindChar.text(`绑定当前角色：${getCharName() || '未选择角色'}`).prop('disabled', !getCharName());
+    $btnBindUser.text(`绑定当前用户：${getUserName() || '未设置用户'}`).prop('disabled', !getUserName());
+    $btnUnbindProfile.toggle(profile.binding_type !== null);
   };
 
   const measureCustomRuleTextarea = (element: HTMLTextAreaElement, isMobile: boolean) => {
@@ -3044,6 +3126,7 @@ function buildSettingsOverlay(
     rules.forEach(rule => addCustomRuleRow(rule));
     refreshRuleCount();
     syncProfileSelect();
+    refreshBindingControl();
   };
 
   const saveImportedCustomSettings = (payload: unknown) => {
@@ -3212,6 +3295,10 @@ ${scopedRoot} button {
     $root.find('.TH-user-name-custom-rule-row').css({
       background: rgbaFromCssColor(palette.noteBg, 0.56, pDoc),
     });
+    $bindingMenu.css({
+      background: palette.noteBg,
+      border: `1px solid ${palette.lineColor}`,
+    });
     $settingsActions.css('border-top', `1px dashed ${palette.lineColor}`);
 
     flatButtons.forEach($button => {
@@ -3274,8 +3361,9 @@ ${scopedRoot} button {
       ...profile,
       rules: profile.rules.map(normalizeReplacementRule),
     }));
+    const resolvedProfileId = getActiveCustomProfile(s).id;
     activeCustomProfileId =
-      customProfileDrafts.find(profile => profile.id === s.active_custom_profile_id)?.id ?? customProfileDrafts[0].id;
+      customProfileDrafts.find(profile => profile.id === resolvedProfileId)?.id ?? customProfileDrafts[0].id;
     renderCustomRules();
 
     syncCustomThemeVisibility();
@@ -3442,12 +3530,19 @@ ${scopedRoot} button {
     syncActiveDraftFromRows();
     activeCustomProfileId = String($profileSelect.val() ?? activeCustomProfileId);
     renderCustomRules();
+    closeBindingMenu();
     applyTheme(readSelectedTheme(), readCustomThemeColors());
   });
   $btnAddProfile.on('click', () => {
     syncActiveDraftFromRows();
     const nextIndex = customProfileDrafts.length + 1;
-    const profile = { id: createCustomProfileId(), name: `配置${nextIndex}`, rules: getDefaultProfileRules() };
+    const profile: CustomProfile = {
+      id: createCustomProfileId(),
+      name: `配置${nextIndex}`,
+      rules: getDefaultProfileRules(),
+      binding_type: null,
+      binding_name: '',
+    };
     customProfileDrafts.push(profile);
     activeCustomProfileId = profile.id;
     renderCustomRules();
@@ -3475,6 +3570,43 @@ ${scopedRoot} button {
     renderCustomRules();
     applyTheme(readSelectedTheme(), readCustomThemeColors());
   });
+  $btnBindProfile.on('click', (event: any) => {
+    event.stopPropagation();
+    refreshBindingControl();
+    const willOpen = !$bindingMenu.is(':visible');
+    $bindingMenu.toggle(willOpen);
+    $btnBindProfile.attr('aria-expanded', String(willOpen));
+  });
+  $bindingMenu.on('click', (event: any) => event.stopPropagation());
+  const bindActiveProfile = (bindingType: 'char' | 'user') => {
+    const bindingName = bindingType === 'char' ? getCharName() : getUserName();
+    if (!bindingName) {
+      toastr.warning(bindingType === 'char' ? '当前没有可绑定的角色' : '当前没有可绑定的用户');
+      return;
+    }
+    customProfileDrafts.forEach(profile => {
+      if (profile.binding_type === bindingType && profile.binding_name === bindingName) {
+        profile.binding_type = null;
+        profile.binding_name = '';
+      }
+    });
+    const profile = getActiveDraftProfile();
+    profile.binding_type = bindingType;
+    profile.binding_name = bindingName;
+    refreshBindingControl();
+    closeBindingMenu();
+    toastr.info(`保存后，“${profile.name}”会自动用于${bindingType === 'char' ? '角色' : '用户'}“${bindingName}”`);
+  };
+  $btnBindChar.on('click', () => bindActiveProfile('char'));
+  $btnBindUser.on('click', () => bindActiveProfile('user'));
+  $btnUnbindProfile.on('click', () => {
+    const profile = getActiveDraftProfile();
+    profile.binding_type = null;
+    profile.binding_name = '';
+    refreshBindingControl();
+    closeBindingMenu();
+  });
+  p$(pDoc).on(`click.TH_user_name_replace_binding_${getScriptId()}`, closeBindingMenu);
   $btnAddRule.on('click', () => {
     addCustomRuleRow();
     applyTheme(readSelectedTheme(), readCustomThemeColors());
@@ -3555,6 +3687,7 @@ ${scopedRoot} button {
     destroy: () => {
       p$(pWin).off(`resize${settingsResizeNamespace}`);
       p$(pDoc).off(`keydown.TH_user_name_replace_${getScriptId()}`);
+      p$(pDoc).off(`click.TH_user_name_replace_binding_${getScriptId()}`);
       $priorityStyle.remove();
       $layoutStyle.remove();
       $toastStyle.remove();
