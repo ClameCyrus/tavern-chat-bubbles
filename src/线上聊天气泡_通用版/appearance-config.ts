@@ -95,7 +95,7 @@ export function createDefaultAppearanceConfig(): AppearanceConfig {
     deco_offset: 40,
     theme: 'auto',
     sticker_size: '',
-    image_auto_generate: true,
+    image_auto_generate: false,
     image_width: 640,
     image_height: 400,
     collapse_min: 3,
