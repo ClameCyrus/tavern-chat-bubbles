@@ -50,7 +50,7 @@ function initFlynnChatBubbles() {
     },
 
     STICKER_SIZE: '', // *
-    IMAGE_AUTO_GENERATE: true, // * image 类型是否自动请求随机图片
+    IMAGE_AUTO_GENERATE: false, // * image 类型是否自动请求随机图片
     theme: 'auto', // *
     imgW: 640, // *
     imgH: 400, // *
@@ -790,7 +790,7 @@ theme = auto
 sticker_size =
 
 # image 类型是否自动联网生成随机图片。关闭后不发起取图请求，只显示描述和关键词。
-image_auto_generate = true
+image_auto_generate = false
 
 # image 类型随机配图的尺寸，宽x高
 image_size = 640x400
