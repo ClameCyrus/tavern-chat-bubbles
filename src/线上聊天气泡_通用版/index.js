@@ -7,8 +7,9 @@ import {
 } from './appearance-config';
 
 // ============================================================
-// 线上聊天气泡_通用版 v15.6
-// 变更：新增 NPC 通用头像，作为未设置单独头像的 NPC 的兜底；均留空时使用名字文字头像
+// 线上聊天气泡_通用版 v15.7
+// 变更：世界书读写保留完整书名；跳过失效引用，读取失败不再逐条触发斜杠查询或误补条目
+// v15.6：新增 NPC 通用头像，作为未设置单独头像的 NPC 的兜底；均留空时使用名字文字头像
 // v15.5：语音/表情装饰锚定本体；可关闭 image 自动生图；移动端折叠操作改为紧凑组合
 // v15.4：修复移动端标题/系统时间/文件名排版；图片装饰改为锚定相框；取图失败显示关键词
 // v15.3：外观配置与可视化面板新增气泡整体缩放、字号、内边距、宽度、头像和消息间距设置
@@ -795,9 +796,14 @@ stream_mode = defer`;
         try { return !!PD.querySelector('#chat .mes'); } catch (e) { return false; }
     }
 
+    // 世界书名是文件标识，首尾空格也属于名字；不能 trim，也不能把对象强转成书名。
+    function isWorldbookName(name) {
+        return typeof name === 'string' && name.length > 0;
+    }
+
     // ---------- 闸门二：解析角色绑定世界书名（不创建任何东西） ----------
     async function resolveBookName() {
-        if (CONFIG.WI_TARGET && CONFIG.WI_TARGET.trim()) return CONFIG.WI_TARGET.trim();
+        if (isWorldbookName(CONFIG.WI_TARGET)) return CONFIG.WI_TARGET;
 
         if (typeof getCharWorldbookNames === 'function') {
             const tries = [
@@ -809,23 +815,24 @@ stream_mode = defer`;
                 try {
                     const r = await fn();
                     if (!r) continue;
-                    if (typeof r === 'string' && r.trim()) return r.trim();
-                    if (r.primary && String(r.primary).trim()) return String(r.primary).trim();
-                    if (Array.isArray(r.additional) && r.additional.length) return String(r.additional[0]).trim();
+                    if (isWorldbookName(r)) return r;
+                    if (isWorldbookName(r.primary)) return r.primary;
+                    const additional = Array.isArray(r.additional) ? r.additional.find(isWorldbookName) : null;
+                    if (additional) return additional;
                 } catch (e) {}
             }
         } else if (typeof getCharLorebooks === 'function') {
             try {
                 const r = await getCharLorebooks('current');
-                if (typeof r === 'string' && r.trim()) return r.trim();
-                if (r && r.primary) return String(r.primary).trim();
+                if (isWorldbookName(r)) return r;
+                if (r && isWorldbookName(r.primary)) return r.primary;
             } catch (e) {}
         }
 
         if (typeof triggerSlash === 'function') {
             try {
-                const n = String(await triggerSlash('/getcharbook') || '').trim();
-                if (n && n !== 'undefined' && n !== 'null') return n;
+                const n = await triggerSlash('/getcharbook');
+                if (isWorldbookName(n) && n !== 'undefined' && n !== 'null') return n;
             } catch (e) {}
         }
         return '';
@@ -837,10 +844,10 @@ stream_mode = defer`;
         try {
             if (typeof getOrCreateChatWorldbook === 'function') {
                 const n = await getOrCreateChatWorldbook();
-                if (n && String(n).trim()) return String(n).trim();
+                if (isWorldbookName(n)) return n;
             } else if (typeof getOrCreateChatLorebook === 'function') {
                 const n = await getOrCreateChatLorebook();
-                if (n && String(n).trim()) return String(n).trim();
+                if (isWorldbookName(n)) return n;
             }
         } catch (e) {}
         return '';
@@ -848,8 +855,8 @@ stream_mode = defer`;
 
     // ---------- 闸门三：世界书文件真实存在 ----------
     // 三态判定：'yes' 确认存在 / 'no' 确认不存在 / 'unknown' 接口不可用无法判断
-    async function bookState(name) {
-        if (!name) return 'no';
+    async function listedBookState(name) {
+        if (!isWorldbookName(name)) return 'no';
         try {
             if (typeof getWorldbookNames === 'function') {
                 const list = await getWorldbookNames();
@@ -865,9 +872,23 @@ stream_mode = defer`;
         try {
             if (Array.isArray(PW.world_names)) return PW.world_names.includes(name) ? 'yes' : 'no';
         } catch (e) {}
-        const list = await listEntries(name);
-        if (list !== null) return 'yes';
-        return (API.read || API.getEntries) ? 'no' : 'unknown';
+        return 'unknown';
+    }
+
+    async function bookState(name) {
+        const state = await listedBookState(name);
+        if (state !== 'unknown') return state;
+        try {
+            return (await listEntries(name)) !== null ? 'yes' : 'unknown';
+        } catch (error) {
+            console.warn(`[聊天气泡] 无法确认世界书 ${JSON.stringify(name)} 是否可读：`, error);
+            return 'unknown';
+        }
+    }
+
+    // 斜杠命令会自行弹警告，try/catch 拦不住；只对列表中确认存在的完整书名使用。
+    async function canUseWorldbookSlash(book) {
+        return typeof triggerSlash === 'function' && (await listedBookState(book)) === 'yes';
     }
 
     // 布尔包装：无法确认时按放行处理，避免手动注入被死锁
@@ -876,19 +897,30 @@ stream_mode = defer`;
     }
 
     async function listEntries(book) {
+        if ((await listedBookState(book)) === 'no') {
+            throw Error(`世界书文件不存在：${JSON.stringify(book)}`);
+        }
+        let readError = null;
         // 优先使用现代接口 getWorldbook，旧接口链作为回退
         if (API.read) {
             try {
                 const r = await API.read(book);
                 if (Array.isArray(r)) return r;
-            } catch (e) {}
+                readError = Error('getWorldbook 未返回条目数组');
+            } catch (error) { readError = error; }
         }
-        if (!API.getEntries) return null;
-        try {
-            const r = await API.getEntries(book);
-            if (Array.isArray(r)) return r;
-            if (r && Array.isArray(r.entries)) return r.entries;
-        } catch (e) {}
+        if (API.getEntries) {
+            try {
+                const r = await API.getEntries(book);
+                if (Array.isArray(r)) return r;
+                if (r && Array.isArray(r.entries)) return r.entries;
+                readError = Error('旧版世界书接口未返回条目数组');
+            } catch (error) { readError = error; }
+        }
+        // null 只表示环境没有整书读取接口；读取失败必须上抛，不能误判成条目缺失。
+        if (API.read || API.getEntries) {
+            throw new Error(`读取世界书失败：${JSON.stringify(book)}`, { cause: readError });
+        }
         return null;
     }
 
@@ -929,8 +961,7 @@ stream_mode = defer`;
 
         const seen = new Set();
         return [chat].concat(additionals, globals)
-            .map(name => String(name || '').trim())
-            .filter(name => name && name !== targetBook && !seen.has(name) && seen.add(name));
+            .filter(name => isWorldbookName(name) && name !== targetBook && !seen.has(name) && seen.add(name));
     }
 
     // 一次读完所有去重范围内的世界书，记录每个条目的最优先来源，
@@ -939,30 +970,40 @@ stream_mode = defer`;
         const books = await resolveInjectionGuardBooks(targetBook);
         const titles = new Set(Object.keys(SPEC).map(key => SPEC[key].title));
         const hits = {};
-        const counts = {};
+        const counts = Object.create(null);
+        const scannedBooks = [];
+        const unreadableBooks = [];
         for (const book of books) {
-            const matchedTitles = new Set();
-            const entries = await listEntries(book);
-            if (entries) {
-                entries.forEach(entry => {
-                    const title = entryTitle(entry);
-                    if (!titles.has(title)) return;
-                    matchedTitles.add(title);
-                    if (!hits[title]) hits[title] = { book: book, entry: entry };
-                });
-                counts[book] = matchedTitles.size;
+            if ((await listedBookState(book)) === 'no') {
+                console.info(`[聊天气泡] 跳过已失效的世界书引用：${JSON.stringify(book)}`);
                 continue;
             }
-            // 旧版环境若无法列出整本世界书，则逐标题使用 STScript 兜底查询。
-            for (const title of titles) {
-                const found = await findEntry(book, title);
-                if (!found) continue;
-                matchedTitles.add(title);
-                if (!hits[title]) hits[title] = { book: book, entry: found.entry };
+            try {
+                const matches = new Map();
+                const entries = await listEntries(book);
+                if (entries) {
+                    entries.forEach(entry => {
+                        const title = entryTitle(entry);
+                        if (titles.has(title) && !matches.has(title)) matches.set(title, entry);
+                    });
+                } else {
+                    // 仅在整书读取接口缺席时兼容旧命令；失败后停止整本书的查询。
+                    for (const title of titles) {
+                        const found = await findEntry(book, title);
+                        if (found) matches.set(title, found.entry);
+                    }
+                }
+                matches.forEach((entry, title) => {
+                    if (!hits[title]) hits[title] = { book: book, entry: entry };
+                });
+                counts[book] = matches.size;
+                scannedBooks.push(book);
+            } catch (error) {
+                unreadableBooks.push(book);
+                console.warn(`[聊天气泡] 本轮跳过无法读取的世界书 ${JSON.stringify(book)}：`, error);
             }
-            counts[book] = matchedTitles.size;
         }
-        return { books: books, hits: hits, counts: counts };
+        return { books: scannedBooks, hits: hits, counts: counts, unreadableBooks: unreadableBooks };
     }
 
     async function countBubbleEntries(book) {
@@ -1000,12 +1041,11 @@ stream_mode = defer`;
             if (hit) return { uid: hit.uid, entry: hit };
             return null;
         }
-        if (typeof triggerSlash === 'function') {
-            try {
-                const r = String(await triggerSlash(`/findentry file="${escapeForST(book)}" field=comment ${escapeForST(title)}`) || '').trim();
-                if (/^\d+$/.test(r)) return { uid: Number(r), entry: null };
-            } catch (e) {}
+        if (!(await canUseWorldbookSlash(book))) {
+            throw Error(`无法安全查询世界书：${JSON.stringify(book)}，请检查酒馆助手接口和世界书列表。`);
         }
+        const r = String(await triggerSlash(`/findentry file="${escapeForST(book)}" field=comment ${escapeForST(title)}`) || '').trim();
+        if (/^\d+$/.test(r)) return { uid: Number(r), entry: null };
         return null;
     }
 
@@ -1013,13 +1053,15 @@ stream_mode = defer`;
         const found = await findEntry(book, title);
         if (!found) return null;
         if (found.entry && typeof found.entry.content === 'string') return found.entry.content;
-        if (typeof triggerSlash === 'function') {
+        if (await canUseWorldbookSlash(book)) {
             try {
                 const c = await triggerSlash(`/getentryfield file="${escapeForST(book)}" field=content ${found.uid}`);
                 if (typeof c === 'string') return c;
-            } catch (e) {}
+            } catch (error) {
+                throw new Error(`读取世界书条目失败：${JSON.stringify(book)} / ${title}`, { cause: error });
+            }
         }
-        return null;
+        throw Error(`无法读取世界书条目内容：${JSON.stringify(book)} / ${title}`);
     }
 
     // ---------- 条目对象构造 ----------
@@ -1137,7 +1179,7 @@ stream_mode = defer`;
     // ---------- STscript 兜底 ----------
     // 返回 true 表示写入动作成功执行；false 表示命令不可用或抛错
     async function stSetField(book, uid, field, value) {
-        if (typeof triggerSlash !== 'function') return false;
+        if (!(await canUseWorldbookSlash(book))) return false;
         try {
             await triggerSlash(`/setentryfield file="${escapeForST(book)}" uid=${uid} field=${field} ${escapeForST(String(value))}`);
             return true;
@@ -1195,7 +1237,7 @@ stream_mode = defer`;
             } catch (e) {}
         }
         if (typeof triggerSlash === 'function') {
-            await stSetField(book, uid, 'disable', wantEnabled ? 'false' : 'true');
+            if (!(await stSetField(book, uid, 'disable', wantEnabled ? 'false' : 'true'))) return false;
             console.info(`[聊天气泡] 已请求切换条目「${spec.title}」开关为${wantEnabled ? '开启' : '关闭'}（${book}）`);
             return true;
         }
@@ -1252,7 +1294,7 @@ stream_mode = defer`;
     }
 
     async function stCreate(book, spec, content) {
-        if (typeof triggerSlash !== 'function') return null;
+        if (!(await canUseWorldbookSlash(book))) return null;
         let uid = null;
         try {
             const r = String(await triggerSlash(`/createentry file="${escapeForST(book)}" key="" ${escapeForST(spec.title)}`) || '').trim();
@@ -1286,7 +1328,7 @@ stream_mode = defer`;
         if (!found) return;
         spec.uid = found.uid;
         if (found.entry && positionOK(found.entry, spec)) return;
-        if (typeof triggerSlash === 'function') {
+        if (await canUseWorldbookSlash(book)) {
             await stApplyPosition(book, found.uid, spec);
             return;
         }
@@ -1618,6 +1660,9 @@ stream_mode = defer`;
             const homeBook = await resolveInjectionHomeBook(book, guardScan);
 
             async function routedUpsert(spec, content, overwrite) {
+                if (guardScan.unreadableBooks.length && !guardEntries[spec.title] && !(await findEntry(book, spec.title))) {
+                    throw Error(`部分世界书读取失败，无法确认「${spec.title}」是否已存在，本次未补写：${guardScan.unreadableBooks.map(name => JSON.stringify(name)).join('、')}`);
+                }
                 const route = await upsertRoutedEntry(book, homeBook, guardEntries, spec, content, overwrite);
                 STK.sources[spec.title] = route.book;
                 if (route.result !== 'external') verifiedBooks.add(route.book);
@@ -1700,6 +1745,7 @@ stream_mode = defer`;
             else if (manual && skipped.length) toastMsg('检测到聊天气泡条目已存在于其它已启用世界书，本次未重复注入，配置已重新读取。', 'success');
             else if (manual) toastMsg(`「${book}」条目已同步，配置已重新读取。`, 'success');
         } catch (err) {
+            STK.loaded = false;
             console.warn('[聊天气泡] 世界书处理异常：', err);
             if (manual) toastMsg('世界书处理出错，详见控制台。', 'error');
         } finally {
@@ -2820,8 +2866,8 @@ stream_mode = defer`;
         if (tavern_events.WORLDINFO_UPDATED) {
             let wiTimer = null;
             eventOn(tavern_events.WORLDINFO_UPDATED, (name) => {
-                const bookName = String(name || '').trim();
-                if (!bookName) return;
+                const bookName = name;
+                if (!isWorldbookName(bookName)) return;
                 if (STK.busy) return;
                 // 自写防抖：我们自己刚写入后 3 秒内的回波一律忽略
                 if (Date.now() - (STK.lastWrite || 0) < (STK.quiet || 3000)) return;
@@ -2911,8 +2957,13 @@ stream_mode = defer`;
         if (STK.sources[SPEC.conf.title]) candidates.push(STK.sources[SPEC.conf.title]);
         candidates.push(primaryBook);
         for (const book of [...new Set(candidates.filter(Boolean))]) {
-            const content = await readEntryContent(book, SPEC.conf.title);
-            if (content != null) return { primaryBook, book, content };
+            try {
+                const content = await readEntryContent(book, SPEC.conf.title);
+                if (content != null) return { primaryBook, book, content };
+            } catch (error) {
+                if (book === primaryBook) throw error;
+                console.warn(`[聊天气泡] 外观配置原来源 ${JSON.stringify(book)} 已不可读，重新定位：`, error);
+            }
         }
 
         const scan = await scanInjectionGuardEntries(primaryBook);
@@ -2920,6 +2971,9 @@ stream_mode = defer`;
         if (external && external.book) {
             const content = await readEntryContent(external.book, SPEC.conf.title);
             if (content != null) return { primaryBook, book: external.book, content };
+        }
+        if (scan.unreadableBooks.length) {
+            throw Error(`无法确认外观配置的位置，请先检查无法读取的世界书：${scan.unreadableBooks.map(name => JSON.stringify(name)).join('、')}`);
         }
         return { primaryBook, book: primaryBook, content: CONFIG_LIB_DEFAULT };
     }
@@ -3078,7 +3132,10 @@ stream_mode = defer`;
                 toastMsg('未找到可写入的世界书，请先为当前角色绑定一本已存在的世界书。', 'error');
                 return;
             }
-            const res = await upsertEntry(book, SPEC.conf, CONFIG_LIB_DEFAULT, true);
+            const res = await upsertEntry(book, SPEC.conf, CONFIG_LIB_DEFAULT, true).catch(error => {
+                console.warn(`[聊天气泡] 重置外观配置失败（${JSON.stringify(book)}）：`, error);
+                return 'failed';
+            });
             if (res === 'failed') {
                 toastMsg('重置失败，请检查世界书权限。', 'error');
                 return;
