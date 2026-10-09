@@ -1,4 +1,6 @@
 import { z } from 'zod';
+import { createEchoTheaterEnhancer } from './echo-theater';
+import { createQianyeTheaterEnhancer } from './qianye-theater';
 
 declare const $: any;
 declare const toastr: any;
@@ -111,6 +113,11 @@ type UiTheme = ThemePresetKey | 'tavern' | 'custom';
 type PersistentMessageBackup = {
   message: string;
   swipes?: string[];
+  owner?: { chat_id: string; message_id: number };
+  applied_message?: string;
+  applied_swipes?: string[];
+  page_original?: string;
+  page_applied?: string;
 };
 
 type MessageState = {
@@ -124,10 +131,12 @@ type ChatMessagePatch = {
   message_id: number;
   message?: string;
   swipes?: string[];
+  swipes_data?: Record<string, any>[];
   data?: Record<string, any>;
 };
 
-const LOG_PREFIX = '[用户名替换脚本V2.0]';
+const SCRIPT_VERSION = '2.5';
+const LOG_PREFIX = `[用户名替换脚本V${SCRIPT_VERSION}]`;
 const DEFAULT_CUSTOM_PROFILE_ID = 'profile-1';
 const DEFAULT_CUSTOM_THEME_PROFILE_ID = 'theme-1';
 const USER_RULE_SOURCE = '{{user}}';
@@ -162,6 +171,11 @@ const ThemeCustomColorsSchema = z.object({
 const PersistentMessageBackupSchema = z.object({
   message: z.string(),
   swipes: z.array(z.string()).optional(),
+  owner: z.object({ chat_id: z.string(), message_id: z.number().int().nonnegative() }).optional(),
+  applied_message: z.string().optional(),
+  applied_swipes: z.array(z.string()).optional(),
+  page_original: z.string().optional(),
+  page_applied: z.string().optional(),
 });
 
 const ReplacementRuleSchema = z.object({
@@ -190,13 +204,13 @@ const CustomSettingsExportSchema = z.object({
   version: z.literal(1).default(1),
   custom_enabled: z.boolean().default(true),
   active_custom_profile_id: z.string().default(DEFAULT_CUSTOM_PROFILE_ID),
-  custom_profiles: z.array(CustomProfileSchema).default([]),
+  custom_profiles: z.array(CustomProfileSchema).min(1),
 });
 
 const ThemeSettingsExportSchema = z.object({
   version: z.literal(1).default(1),
   active_custom_theme_profile_id: z.string().default(DEFAULT_CUSTOM_THEME_PROFILE_ID),
-  custom_theme_profiles: z.array(CustomThemeProfileSchema).default([]),
+  custom_theme_profiles: z.array(CustomThemeProfileSchema).min(1),
 });
 
 const SettingsSchema = z
@@ -222,6 +236,7 @@ const SettingsSchema = z
 
     // 是否替换“回声小剧场”的角色标题与 Shadow DOM 正文
     replace_echo_theater: z.boolean().default(false),
+    replace_qianye_theater: z.boolean().default(false),
 
     // {{user}} 对应名称替换
     user_enabled: z.boolean().default(true),
@@ -827,6 +842,10 @@ function compileMatcher(rules: ReplacementRule[]): CompiledMatcher | null {
   return { regex, map, tokens };
 }
 
+function isOriginalTextBlurRule(rule: ReplacementRule): boolean {
+  return rule.blurred && !rule.replacement_text.trim() && !normalizeUrl(rule.image_url);
+}
+
 function replaceTextContentByMatcher(source: string, matcher: CompiledMatcher | null): string {
   if (!matcher || !source) return source;
 
@@ -838,7 +857,9 @@ function replaceTextContentByMatcher(source: string, matcher: CompiledMatcher | 
     const match = findNextTokenMatch(source, matcher, last);
     if (!match) break;
 
-    const replacement_text = match.rule.replacement_text.trim();
+    const replacement_text = isOriginalTextBlurRule(match.rule)
+      ? source.slice(match.start, match.end)
+      : match.rule.replacement_text.trim();
 
     result += source.slice(last, match.start);
     result += replacement_text;
@@ -1049,7 +1070,8 @@ function makeReplacementNode(
   if (shouldShowText) {
     appendFormattedReplacementText($wrap[0] as HTMLElement, text, ownerDocument);
   } else if (!hasImage && !hasText) {
-    // 图片文本都空时，明确按空替换处理。
+    // 单独模糊原文时保留文字；没有勾选模糊才按空替换删除。
+    if (rule.blurred) $wrap.append(ownerDocument.createTextNode(original));
   } else if (!shouldShowImage) {
     // 当前模式隐藏了已有内容时，回退到仍可显示的那一项
     if (hasText) {
@@ -1068,10 +1090,6 @@ function areStringArraysEqual(lhs?: string[], rhs?: string[]): boolean {
   if (!lhs || !rhs) return false;
   if (lhs.length !== rhs.length) return false;
   return lhs.every((value, index) => value === rhs[index]);
-}
-
-function isSameBackup(lhs: PersistentMessageBackup | null, rhs: PersistentMessageBackup | null): boolean {
-  return JSON.stringify(lhs ?? null) === JSON.stringify(rhs ?? null);
 }
 
 function getPersistentBackupDataKeys(data: Record<string, any> | undefined): string[] {
@@ -1150,6 +1168,68 @@ function restoreAll() {
     });
 }
 
+function getOriginalCodeBlockText(code: HTMLElement): string {
+  // 在副本中还原显示替换，避免复制时改动可见 DOM、语法高亮或第三方事件。
+  const clone = code.cloneNode(true) as HTMLElement;
+  restoreElement($(clone));
+  clone.querySelectorAll('.code-copy').forEach(button => button.remove());
+  return clone.textContent ?? '';
+}
+
+function createCodeBlockCopyEnhancer(getSettings: () => Settings, ownerDocument: Document): () => void {
+  let lastPointerCopy: { button: Element; timestamp: number } | null = null;
+
+  const handleCopy = (event: Event) => {
+    const settings = getSettings();
+    if (!settings.enabled || settings.replace_message_content) return;
+
+    const target = event.target as Element | null;
+    if (target?.nodeType !== Node.ELEMENT_NODE) return;
+    const button = target.closest('.code-copy');
+    const code = button?.closest<HTMLElement>('pre > code');
+    if (
+      !button ||
+      !code?.closest('#chat > .mes') ||
+      !code.closest(MESSAGE_DISPLAY_CONTENT_SELECTOR) ||
+      !code.querySelector(`.${REPLACEMENT_CLASS}`)
+    ) {
+      return;
+    }
+
+    // 酒馆原生按钮在 pointerup 的目标阶段读取 code.textContent，须在捕获阶段接管。
+    // 同时兼容使用 click 的按钮；一次 pointerup + click 只写入一次剪贴板。
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    if (
+      event.type === 'click' &&
+      lastPointerCopy?.button === button &&
+      event.timeStamp - lastPointerCopy.timestamp >= 0 &&
+      event.timeStamp - lastPointerCopy.timestamp < 1000
+    ) {
+      lastPointerCopy = null;
+      return;
+    }
+    lastPointerCopy = event.type === 'pointerup' ? { button, timestamp: event.timeStamp } : null;
+
+    void (async () => {
+      try {
+        await builtin.copyText(getOriginalCodeBlockText(code));
+        toastr.info('已复制原文', '', { timeOut: 2000 });
+      } catch (error) {
+        console.error(`${LOG_PREFIX} 复制代码块原文失败`, error);
+      }
+    })();
+  };
+
+  ownerDocument.addEventListener('pointerup', handleCopy, true);
+  ownerDocument.addEventListener('click', handleCopy, true);
+  return () => {
+    ownerDocument.removeEventListener('pointerup', handleCopy, true);
+    ownerDocument.removeEventListener('click', handleCopy, true);
+    lastPointerCopy = null;
+  };
+}
+
 function isEmptyImageTagMarker(element: Element): boolean {
   return (
     element.tagName === 'IMG' &&
@@ -1179,12 +1259,17 @@ function isInsideTavernHelperFrontendSource(element: Element): boolean {
   const code = element.closest('code');
   if (!code) return false;
 
-  // 酒馆助手会把这类隐藏代码块当作 iframe 的 HTML 源码读取。若提前往源码 DOM
-  // 插入替换 span，渲染器会把 span 当成页面内容，最终在 iframe 末尾泄漏出 USERUSER。
+  // 进入聊天时，HTML 源码还没有 custom-html / TH-render / hidden! 标记。
+  // 必须按源码先识别：酒馆助手用 find('code').text() 读取整个前端，替换结果里
+  // 嵌套的 <code> 会被重复拼接到源码末尾，连同源码里的替换一起污染 iframe。
   if (code.classList.contains('custom-html')) return true;
 
   const pre = code.closest('pre');
-  return Boolean(pre?.classList.contains('hidden!') && pre.parentElement?.classList.contains('TH-render'));
+  if (!pre) return false;
+  if (pre.parentElement?.classList.contains('TH-render') && pre.parentElement.querySelector('iframe')) return true;
+
+  // 覆盖酒馆助手依据 html> / <head> / <body 判断前端的条件，保护尚未渲染的代码块。
+  return /html>|<head>|<body/i.test(pre.textContent ?? '');
 }
 
 function shouldSkipReplacementNode(node: Text, root: HTMLElement): boolean {
@@ -1212,6 +1297,8 @@ type TextNodeSlice = {
 };
 
 function replaceTextAcrossCodeMarkup(code: HTMLElement, matcher: CompiledMatcher, settings: Settings) {
+  if (isInsideTavernHelperFrontendSource(code)) return;
+
   const walker = code.ownerDocument.createTreeWalker(code, NodeFilter.SHOW_TEXT);
   const slices: TextNodeSlice[] = [];
   let source = '';
@@ -1390,6 +1477,10 @@ function destroyNestedIframeDisplayState(frame: HTMLIFrameElement, restore = fal
 
 function applyToNestedIframe(frame: HTMLIFrameElement, matcher: CompiledMatcher | null, settings: Settings) {
   try {
+    if (!settings.enabled || !matcher) {
+      destroyNestedIframeDisplayState(frame, true);
+      return;
+    }
     const ownerDocument = frame.contentDocument;
     const body = ownerDocument?.body;
     if (!ownerDocument || !body) return;
@@ -1498,146 +1589,13 @@ function applyToAllVisible(settings: Settings) {
   });
 }
 
-type EchoTheaterShadowState = {
-  observer: MutationObserver;
-};
-
-function createEchoTheaterEnhancer(
-  getSettings: () => Settings,
-  pDoc: Document,
-  pWin: Window,
-): { reapply: () => void; destroy: (restore: boolean) => void } {
-  const ParentMutationObserver = (pWin as any).MutationObserver as typeof MutationObserver | undefined;
-  const shadowStates = new Map<ShadowRoot, EchoTheaterShadowState>();
-  let destroyed = false;
-  let outputElement: HTMLElement | null = null;
-  let outputObserver: MutationObserver | null = null;
-  let documentObserver: MutationObserver | null = null;
-  let trackedTitle: HTMLElement | null = null;
-  let applyTimer: number | null = null;
-
-  const restoreShadowRoot = (root: ShadowRoot) => {
-    root.querySelectorAll<HTMLElement>('.t-shadow-content').forEach(content => restoreElement($(content)));
-  };
-
-  const destroyShadowState = (root: ShadowRoot, restore: boolean) => {
-    const state = shadowStates.get(root);
-    if (!state) return;
-    state.observer.disconnect();
-    if (restore) restoreShadowRoot(root);
-    shadowStates.delete(root);
-  };
-
-  const restoreTitle = () => {
-    if (!trackedTitle) return;
-    restoreElement($(trackedTitle));
-    trackedTitle = null;
-  };
-
-  const scheduleApply = () => {
-    if (destroyed) return;
-    if (applyTimer !== null) pWin.clearTimeout(applyTimer);
-    applyTimer = pWin.setTimeout(() => {
-      applyTimer = null;
-      reapply();
-    }, 80);
-  };
-
-  const observeOutputElement = () => {
-    const nextOutput = pDoc.querySelector<HTMLElement>('#t-output-content');
-    if (nextOutput === outputElement) return;
-
-    outputObserver?.disconnect();
-    outputObserver = null;
-    outputElement = nextOutput;
-
-    if (!outputElement || !ParentMutationObserver) return;
-    outputObserver = new ParentMutationObserver(scheduleApply);
-    outputObserver.observe(outputElement, { childList: true, characterData: true, subtree: true });
-  };
-
-  const observeShadowRoot = (root: ShadowRoot) => {
-    let state = shadowStates.get(root);
-    if (!state) {
-      const ShadowMutationObserver = (root.ownerDocument.defaultView as any)?.MutationObserver as
-        typeof MutationObserver | undefined;
-      if (!ShadowMutationObserver) return;
-      state = { observer: new ShadowMutationObserver(scheduleApply) };
-      shadowStates.set(root, state);
-    }
-    state.observer.observe(root, { childList: true, characterData: true, subtree: true });
-  };
-
-  const reapply = () => {
-    if (destroyed) return;
-    if (applyTimer !== null) pWin.clearTimeout(applyTimer);
-    applyTimer = null;
-    observeOutputElement();
-
-    // 替换过程中暂停观察，避免本脚本插入/还原节点触发自己的观察器。
-    outputObserver?.disconnect();
-    shadowStates.forEach(state => state.observer.disconnect());
-
-    const settings = getSettings();
-    const active = settings.enabled && settings.replace_echo_theater;
-    const matcher = active ? compileMatcher(buildRules(settings)) : null;
-    const nextTitle = pDoc.querySelector<HTMLElement>('#t-char-name');
-
-    if (trackedTitle && trackedTitle !== nextTitle) restoreTitle();
-    trackedTitle = nextTitle;
-    if (trackedTitle) {
-      restoreElement($(trackedTitle));
-      if (active && matcher) applyToTargetElement($(trackedTitle), matcher, settings);
-    }
-
-    const activeRoots = new Set<ShadowRoot>();
-    outputElement?.querySelectorAll<HTMLElement>('.t-shadow-host').forEach(host => {
-      const root = host.shadowRoot;
-      if (!root) return;
-      activeRoots.add(root);
-
-      root.querySelectorAll<HTMLElement>('.t-shadow-content').forEach(content => {
-        restoreElement($(content));
-        if (active && matcher) applyToTargetElement($(content), matcher, settings);
-      });
-      observeShadowRoot(root);
-    });
-
-    for (const root of Array.from(shadowStates.keys())) {
-      if (!activeRoots.has(root) || !root.host.isConnected) destroyShadowState(root, true);
-    }
-
-    if (outputElement && ParentMutationObserver) {
-      outputObserver ??= new ParentMutationObserver(scheduleApply);
-      outputObserver.observe(outputElement, { childList: true, characterData: true, subtree: true });
-    }
-  };
-
-  if (ParentMutationObserver && pDoc.body) {
-    // #t-output-content 本身可能随小剧场的关闭与重新打开而重建；这里只负责重新绑定目标观察器。
-    documentObserver = new ParentMutationObserver(() => {
-      const nextOutput = pDoc.querySelector<HTMLElement>('#t-output-content');
-      if (nextOutput !== outputElement) scheduleApply();
-    });
-    documentObserver.observe(pDoc.body, { childList: true, subtree: true });
-  }
-
-  return {
-    reapply,
-    destroy: restore => {
-      if (destroyed) return;
-      destroyed = true;
-      if (applyTimer !== null) pWin.clearTimeout(applyTimer);
-      applyTimer = null;
-      outputObserver?.disconnect();
-      outputObserver = null;
-      documentObserver?.disconnect();
-      documentObserver = null;
-      restoreTitle();
-      for (const root of Array.from(shadowStates.keys())) destroyShadowState(root, restore);
-      outputElement = null;
-    },
-  };
+function replaceTheaterDisplayHtml(source: string, matcher: CompiledMatcher | null, settings: Settings): string {
+  if (!matcher) return source;
+  const parsed = new DOMParser().parseFromString(source, 'text/html');
+  replaceTextNodesByMatcher(parsed.body, matcher, settings);
+  if (!parsed.body.querySelector(`.${REPLACEMENT_CLASS}`)) return source;
+  const doctype = parsed.doctype ? new XMLSerializer().serializeToString(parsed.doctype) + '\n' : '';
+  return doctype + parsed.documentElement.outerHTML;
 }
 
 function getMessageState(message_id: number): MessageState | null {
@@ -1656,7 +1614,7 @@ function getMessageState(message_id: number): MessageState | null {
     message,
     swiped,
     backup: parsePersistentBackup(message.data),
-    hasStoredBackup: hasStoredBackupKey(message.data),
+    hasStoredBackup: hasStoredBackupKey(message.data) || !!swiped?.swipes_data.some(hasStoredBackupKey),
   };
 }
 
@@ -1667,12 +1625,15 @@ function getAllMessageStates(): MessageState[] {
       getChatMessages('0-{{lastMessageId}}', { include_swipes: true }).map(message => [message.message_id, message]),
     );
 
-    return messages.map(message => ({
-      message,
-      swiped: swipedByMessageId.get(message.message_id) ?? null,
-      backup: parsePersistentBackup(message.data),
-      hasStoredBackup: hasStoredBackupKey(message.data),
-    }));
+    return messages.map(message => {
+      const swiped = swipedByMessageId.get(message.message_id) ?? null;
+      return {
+        message,
+        swiped,
+        backup: parsePersistentBackup(message.data),
+        hasStoredBackup: hasStoredBackupKey(message.data) || !!swiped?.swipes_data.some(hasStoredBackupKey),
+      };
+    });
   } catch {
     return [];
   }
@@ -1684,48 +1645,150 @@ function shouldPersistentlyReplaceMessage(state: MessageState): boolean {
 
 function buildClearPersistentMessageBackupPatch(state: MessageState): ChatMessagePatch | null {
   if (!state.hasStoredBackup) return null;
+  return buildPersistentMessagePatch(state, state.message.message, state.swiped?.swipes, null);
+}
 
-  return {
-    message_id: state.message.message_id,
-    data: withPersistentBackupData(state.message.data, null),
+function getPersistentChatScope(): string {
+  return JSON.stringify([SillyTavern.characterId, SillyTavern.groupId, SillyTavern.getCurrentChatId()]);
+}
+
+function matchesOriginalOrAppliedText(
+  current: string,
+  original: string,
+  applied: string | undefined,
+  matcher: CompiledMatcher | null,
+): boolean {
+  return current === original || current === applied || current === replaceTextContentByMatcher(original, matcher);
+}
+
+function resolvePersistentMessageBackup(
+  state: MessageState,
+  matcher: CompiledMatcher | null,
+): PersistentMessageBackup | null {
+  const candidates = [state.backup, ...(state.swiped?.swipes_data.map(parsePersistentBackup) ?? [])].filter(
+    (backup): backup is PersistentMessageBackup => backup !== null,
+  );
+  const chat_id = getPersistentChatScope();
+  const countMatches = (backup: PersistentMessageBackup) => {
+    const current_texts = state.swiped?.swipes ?? [state.message.message];
+    return current_texts.filter(
+      current =>
+        matchesOriginalOrAppliedText(current, backup.message, backup.applied_message, matcher) ||
+        backup.swipes?.some((original, index) =>
+          matchesOriginalOrAppliedText(current, original, backup.applied_swipes?.[index], matcher),
+        ),
+    ).length;
   };
+  let owned: PersistentMessageBackup | null = null;
+  let bestMatchCount = -1;
+  for (const backup of candidates) {
+    if (backup.owner?.chat_id !== chat_id || backup.owner.message_id !== state.message.message_id) continue;
+    const matchCount = countMatches(backup);
+    if (matchCount > bestMatchCount) {
+      owned = backup;
+      bestMatchCount = matchCount;
+    }
+    // 通常所有备选页共享同一份备份，命中全部正文后不再重复计算其他副本。
+    if (matchCount === (state.swiped?.swipes.length ?? 1)) break;
+  }
+  if (owned) return owned;
+
+  // 旧版备份、删楼后移位的备份必须由当前正文验证；不能只凭继承的楼层变量认领原文。
+  return (
+    candidates.find(backup => {
+      if (backup.owner && backup.owner.chat_id !== chat_id) return false;
+      return countMatches(backup) > 0;
+    }) ?? null
+  );
 }
 
 function reconcileOriginalSwipes(
   original_swipes: string[] | undefined,
   current_swipes: string[] | undefined,
   matcher: CompiledMatcher | null,
+  applied_swipes?: string[],
 ): string[] | undefined {
   if (!current_swipes) return original_swipes?.slice();
   if (!original_swipes) return current_swipes.slice();
-
-  if (original_swipes.length === current_swipes.length) {
-    const is_aligned = original_swipes.every((original, index) => {
-      const expected = replaceTextContentByMatcher(original, matcher);
-      return current_swipes[index] === expected || current_swipes[index] === original;
-    });
-    if (is_aligned) return original_swipes.slice();
-  }
-
-  const matched_originals: string[] = [];
   const used = new Set<number>();
-
-  for (const current of current_swipes) {
-    const matched_index = original_swipes.findIndex((original, index) => {
-      if (used.has(index)) return false;
-      const expected = replaceTextContentByMatcher(original, matcher);
-      return current === expected || current === original;
-    });
-
-    if (matched_index < 0) {
-      return current_swipes.slice();
-    }
-
+  return current_swipes.map((current, current_index) => {
+    const matches = (index: number) =>
+      !used.has(index) &&
+      index < original_swipes.length &&
+      matchesOriginalOrAppliedText(current, original_swipes[index], applied_swipes?.[index], matcher);
+    const matched_index = matches(current_index)
+      ? current_index
+      : original_swipes.findIndex((_, index) => matches(index));
+    // 新增或手动编辑的一页只更新该页，不能让其他备选回复丢失原文。
+    if (matched_index < 0) return current;
     used.add(matched_index);
-    matched_originals.push(original_swipes[matched_index]);
-  }
+    return original_swipes[matched_index];
+  });
+}
 
-  return matched_originals;
+function getPersistentOriginalContent(state: MessageState, matcher: CompiledMatcher | null) {
+  const backup = resolvePersistentMessageBackup(state, matcher);
+  const swipes = state.swiped
+    ? reconcileOriginalSwipes(backup?.swipes, state.swiped.swipes, matcher, backup?.applied_swipes)
+    : undefined;
+  if (swipes && state.swiped && backup?.owner) {
+    state.swiped.swipes.forEach((current, index) => {
+      const pageBackup = parsePersistentBackup(state.swiped!.swipes_data[index]);
+      if (
+        pageBackup?.owner?.chat_id !== backup.owner!.chat_id ||
+        pageBackup.owner.message_id !== backup.owner!.message_id ||
+        pageBackup.page_original === undefined
+      )
+        return;
+      // 不同原文可能替换成完全相同的文字。按每页变量保留归属，删页或重排后也不会认错原文。
+      swipes[index] = matchesOriginalOrAppliedText(current, pageBackup.page_original, pageBackup.page_applied, matcher)
+        ? pageBackup.page_original
+        : current;
+    });
+  }
+  const current = state.message.message;
+  const selected = state.swiped?.swipe_id;
+  const message =
+    selected !== undefined && state.swiped?.swipes[selected] === current && swipes?.[selected] !== undefined
+      ? swipes[selected]
+      : backup && matchesOriginalOrAppliedText(current, backup.message, backup.applied_message, matcher)
+        ? backup.message
+        : current;
+  if (swipes && selected !== undefined) swipes[selected] = message;
+  return { message, swipes };
+}
+
+function buildPersistentMessagePatch(
+  state: MessageState,
+  message: string,
+  swipes: string[] | undefined,
+  backup: PersistentMessageBackup | null,
+): ChatMessagePatch | null {
+  const patch: ChatMessagePatch = { message_id: state.message.message_id };
+  if (state.swiped && swipes?.length) {
+    const next_swipes = swipes.slice();
+    next_swipes[state.swiped.swipe_id] = message;
+    const next_data = next_swipes.map((_, index) =>
+      withPersistentBackupData(
+        index === state.swiped!.swipe_id ? state.message.data : state.swiped!.swipes_data[index],
+        backup
+          ? {
+              ...backup,
+              page_original: backup.swipes?.[index] ?? backup.message,
+              page_applied: next_swipes[index],
+            }
+          : null,
+      ),
+    );
+    if (!areStringArraysEqual(next_swipes, state.swiped.swipes)) patch.swipes = next_swipes;
+    if (JSON.stringify(next_data) !== JSON.stringify(state.swiped.swipes_data)) patch.swipes_data = next_data;
+    // 酒馆助手的 message/data 与 swipes/swipes_data 是互斥写入分支，不能放在同一补丁中。
+  } else {
+    if (message !== state.message.message) patch.message = message;
+    const next_data = withPersistentBackupData(state.message.data, backup);
+    if (JSON.stringify(next_data) !== JSON.stringify(state.message.data)) patch.data = next_data;
+  }
+  return Object.keys(patch).length > 1 ? patch : null;
 }
 
 function buildRestorePersistentMessagePatch(
@@ -1739,26 +1802,8 @@ function buildRestorePersistentMessagePatch(
     return buildClearPersistentMessageBackupPatch(state);
   }
 
-  const current_swipes = state.swiped?.swipes?.slice();
-  const restored_swipes = current_swipes
-    ? reconcileOriginalSwipes(state.backup?.swipes, current_swipes, matcher)
-    : undefined;
-
-  const has_message_diff = state.backup ? state.message.message !== state.backup.message : false;
-  const has_swipes_diff =
-    current_swipes !== undefined &&
-    restored_swipes !== undefined &&
-    !areStringArraysEqual(current_swipes, restored_swipes);
-
-  const patch: ChatMessagePatch = {
-    message_id: state.message.message_id,
-    data: withPersistentBackupData(state.message.data, null),
-  };
-
-  if (state.backup && has_message_diff) patch.message = state.backup.message;
-  if (state.backup && has_swipes_diff && restored_swipes) patch.swipes = restored_swipes;
-
-  return patch;
+  const original = getPersistentOriginalContent(state, matcher);
+  return buildPersistentMessagePatch(state, original.message, original.swipes, null);
 }
 
 function buildSyncPersistentMessagePatch(
@@ -1774,41 +1819,19 @@ function buildSyncPersistentMessagePatch(
     return buildRestorePersistentMessagePatch(state, settings, matcher);
   }
 
-  const current_swipes = state.swiped?.swipes?.slice();
-  const original_message = state.backup?.message ?? state.message.message ?? '';
-  const original_swipes = state.swiped
-    ? reconcileOriginalSwipes(state.backup?.swipes, current_swipes, matcher)
-    : undefined;
-
-  const next_message = replaceTextContentByMatcher(original_message, matcher);
-  const next_swipes = original_swipes?.map(swipe => replaceTextContentByMatcher(swipe, matcher));
-
-  const has_message_diff = next_message !== (state.message.message ?? '');
-  const has_swipes_diff =
-    current_swipes !== undefined && next_swipes !== undefined && !areStringArraysEqual(next_swipes, current_swipes);
-
-  let next_backup = state.backup;
-  if (!next_backup && (has_message_diff || has_swipes_diff)) {
-    next_backup = {
-      message: state.message.message ?? '',
-      swipes: current_swipes?.slice(),
-    };
-  } else if (next_backup && !areStringArraysEqual(next_backup.swipes, original_swipes)) {
-    next_backup = {
-      ...next_backup,
-      swipes: original_swipes,
-    };
-  }
-
-  const should_update_data =
-    state.hasStoredBackup !== (next_backup !== null) || !isSameBackup(state.backup, next_backup);
-  if (!has_message_diff && !has_swipes_diff && !should_update_data) return null;
-
-  const patch: ChatMessagePatch = { message_id: state.message.message_id };
-  if (has_message_diff) patch.message = next_message;
-  if (has_swipes_diff && next_swipes) patch.swipes = next_swipes;
-  if (should_update_data) patch.data = withPersistentBackupData(state.message.data, next_backup);
-  return patch;
+  const original = getPersistentOriginalContent(state, matcher);
+  const next_message = replaceTextContentByMatcher(original.message, matcher);
+  const next_swipes = original.swipes?.map(swipe => replaceTextContentByMatcher(swipe, matcher));
+  const has_replacement = next_message !== original.message || !areStringArraysEqual(next_swipes, original.swipes);
+  const next_backup: PersistentMessageBackup | null = has_replacement
+    ? {
+        ...original,
+        owner: { chat_id: getPersistentChatScope(), message_id: state.message.message_id },
+        applied_message: next_message,
+        applied_swipes: next_swipes,
+      }
+    : null;
+  return buildPersistentMessagePatch(state, next_message, next_swipes, next_backup);
 }
 
 async function writePersistentMessagePatches(patches: Array<ChatMessagePatch | null>): Promise<ChatMessagePatch[]> {
@@ -1943,6 +1966,34 @@ function buildSettingsOverlay(
   height: 100% !important;
   align-content: start !important;
 }
+.${rootClass} .TH-user-name-additional-options > summary {
+  display: flex !important;
+  align-items: center !important;
+  justify-content: space-between !important;
+  gap: 8px !important;
+  padding: 5px 0 !important;
+  font-size: 13px !important;
+  font-weight: 600 !important;
+  cursor: pointer !important;
+  list-style: none !important;
+}
+.${rootClass} .TH-user-name-additional-options > summary::-webkit-details-marker {
+  display: none !important;
+}
+.${rootClass} .TH-user-name-additional-options[open] > summary > .TH-user-name-additional-chevron {
+  transform: rotate(180deg) !important;
+}
+.${rootClass} .TH-user-name-additional-options > .TH-user-name-additional-content {
+  display: grid !important;
+  gap: 8px !important;
+  padding: 7px 0 2px 4px !important;
+}
+.${rootClass} .TH-user-name-additional-options:not([open]) > .TH-user-name-additional-content {
+  display: none !important;
+}
+.${rootClass} .TH-user-name-meta-left {
+  text-align: left !important;
+}
 .${rootClass} .TH-user-name-settings-section-wide {
   grid-column: 1 / -1 !important;
 }
@@ -2026,10 +2077,10 @@ function buildSettingsOverlay(
 }
 .${rootClass} .TH-user-name-theme-toolbar-actions button,
 .${rootClass} .TH-user-name-custom-toolbar-actions button {
-  min-height: 38px !important;
+  min-height: 34px !important;
   min-width: 0 !important;
   width: 100% !important;
-  padding: 7px 8px !important;
+  padding: 5px 8px !important;
   white-space: nowrap !important;
 }
 .${rootClass} .TH-user-name-settings-footer {
@@ -2048,9 +2099,30 @@ function buildSettingsOverlay(
 }
 .${rootClass} .TH-user-name-custom-toolbar-actions {
   display: grid !important;
-  grid-template-columns: repeat(5, minmax(76px, 1fr)) !important;
+  grid-template-columns: repeat(6, minmax(0, 1fr)) !important;
   gap: 6px !important;
   align-items: center !important;
+}
+.${rootClass} .TH-user-name-profile-binding {
+  position: relative !important;
+  min-width: 0 !important;
+  max-width: 100% !important;
+}
+.${rootClass} .TH-user-name-profile-binding > button {
+  padding: 5px 4px !important;
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
+}
+.${rootClass} .TH-user-name-profile-binding-menu {
+  box-sizing: border-box !important;
+  width: min(260px, calc(100vw - 48px)) !important;
+  min-width: 0 !important;
+  max-width: calc(100vw - 48px) !important;
+}
+.${rootClass} .TH-user-name-profile-binding-menu button {
+  text-align: left !important;
+  white-space: normal !important;
+  overflow-wrap: anywhere !important;
 }
 .${rootClass} .TH-user-name-custom-rule-toolbar {
   display: block !important;
@@ -2138,7 +2210,7 @@ function buildSettingsOverlay(
     grid-template-columns: minmax(0, 1fr) !important;
   }
   .${rootClass} .TH-user-name-custom-toolbar-actions {
-    grid-template-columns: repeat(5, minmax(0, 1fr)) !important;
+    grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
   }
 }
 @media (max-width: 720px) {
@@ -2182,14 +2254,19 @@ function buildSettingsOverlay(
     grid-template-columns: minmax(0, 1fr) !important;
   }
   .${rootClass} .TH-user-name-custom-toolbar-actions {
-    grid-template-columns: repeat(6, minmax(0, 1fr)) !important;
+    grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
     width: 100% !important;
   }
-  .${rootClass} .TH-user-name-custom-toolbar-actions button {
-    grid-column: span 2 !important;
+  .${rootClass} .TH-user-name-custom-toolbar-actions > * {
+    grid-column: auto !important;
   }
-  .${rootClass} .TH-user-name-custom-toolbar-actions button:nth-child(4) {
-    grid-column: 2 / span 2 !important;
+  .${rootClass} .TH-user-name-profile-binding-menu {
+    left: 0 !important;
+    right: auto !important;
+  }
+  .${rootClass} .TH-user-name-theme-toolbar-actions button,
+  .${rootClass} .TH-user-name-custom-toolbar-actions button {
+    min-height: 36px !important;
   }
   .${rootClass} .TH-user-name-custom-rule-count {
     padding: 2px 4px !important;
@@ -2333,8 +2410,8 @@ function buildSettingsOverlay(
   };
 
   const btnStyle: Partial<CSSStyleDeclaration> = {
-    padding: '8px 12px',
-    borderRadius: '12px',
+    padding: '6px 10px',
+    borderRadius: '9px',
     border: '1px solid transparent',
     cursor: 'pointer',
     transition: 'transform 0.15s ease, box-shadow 0.15s ease',
@@ -2414,7 +2491,7 @@ function buildSettingsOverlay(
     .css({ display: 'flex', gap: '7px', 'align-items': 'center', 'min-width': '0' })
     .appendTo($header);
   const $title = p$('<div>')
-    .text('替换设置')
+    .text(`替换设置 · V${SCRIPT_VERSION}`)
     .css({ 'font-size': '18px', 'font-weight': '700', 'letter-spacing': '0.04em' })
     .appendTo($headerText);
   const $btnHelp = registerFlatButton(
@@ -2481,19 +2558,23 @@ function buildSettingsOverlay(
   p$('<div>').text('显示替换').css({ 'font-weight': '700', 'margin-top': '2px' }).appendTo($helpModal);
   registerMeta('未开启“同步替换正文内容”时，只改变聊天页面的显示，不会修改聊天记录或发送给模型的提示词。', $helpModal);
   registerMeta('纯显示替换也会应用到正则美化生成的同源状态栏，只遮盖状态栏里的显示文字。', $helpModal);
-  registerMeta('名字输入可用 ,、，、、、;、；、/ 或换行分隔多个词；替换项留空时，对应名字会从显示中消失。', $helpModal);
+  registerMeta(
+    '名字输入可用 ,、，、、、;、；、/ 或换行分隔多个词。文字和图片都留空时，勾选“模糊”会对原文字打码，未勾选则删除。',
+    $helpModal,
+  );
   registerMeta(
     '替换项支持安全的行内格式：*斜体*、**粗体**、***粗斜体***、`代码` 或 <code>代码</code>。其他 HTML 会按普通文字显示。',
     $helpModal,
   );
   registerMeta('代码样式、代码块和独立的思维/推理内容区域中的名字也会参与显示替换。', $helpModal);
+  registerMeta('未开启正文同步时，代码块的复制按钮会复制显示替换前的原文。', $helpModal);
   registerMeta('每条规则的“模糊”是独立显示效果，可与文字格式、图片组合使用，不会把模糊样式写进聊天正文。', $helpModal);
   registerMeta(
     '“遮盖消息标题名字”默认关闭；开启后只替换楼层顶部的用户名或角色名，不影响日期和标题栏按钮。',
     $helpModal,
   );
   registerMeta(
-    '“替换回声小剧场”默认关闭；开启后只处理小剧场的角色标题和正文，不会修改工具栏、筛选器等控件。',
+    '附加打码默认关闭，回声与千夜可分别开启，仅修改显示。千夜复制、保存与编辑保留原文；开启或改规则会重绘，暂不处理内部脚本新增文字。',
     $helpModal,
   );
 
@@ -2513,7 +2594,7 @@ function buildSettingsOverlay(
   p$('<li>').text('需要 Repo 状态栏，用于替换状态栏里的名字。').appendTo($contentSyncCases);
   themedMetaTexts.push($contentSyncCases);
   registerMeta(
-    '离开当前聊天或卸载脚本时，正文同步会自动关闭，并尝试恢复原文。（为了防止意外退出导致全文变更）',
+    '切换聊天或卸载脚本时，正文同步会自动关闭。离开的聊天再次载入时会恢复备份原文；同步期间手动修改的内容会保留。',
     $helpModal,
   );
 
@@ -2552,13 +2633,24 @@ function buildSettingsOverlay(
   const $headerNames = p$('<input type="checkbox">').appendTo($headerNamesRow);
   p$('<span>').text('遮盖消息标题名字').appendTo($headerNamesRow);
 
+  const $additionalOptions = p$('<details>').addClass('TH-user-name-additional-options').appendTo($globalSec);
+  const $additionalSummary = p$('<summary>').appendTo($additionalOptions);
+  p$('<span>').text('附加界面打码').appendTo($additionalSummary);
+  p$('<span aria-hidden="true">').addClass('TH-user-name-additional-chevron').text('⌄').appendTo($additionalSummary);
+  const $additionalContent = p$('<div>').addClass('TH-user-name-additional-content').appendTo($additionalOptions);
   const $echoTheaterRow = p$('<label>')
     .css({ display: 'flex', gap: '8px', 'align-items': 'center' })
-    .appendTo($globalSec);
+    .appendTo($additionalContent);
   const $echoTheater = p$('<input type="checkbox">').appendTo($echoTheaterRow);
-  p$('<span>').text('替换回声小剧场').appendTo($echoTheaterRow);
+  p$('<span>').text('回声小剧场').appendTo($echoTheaterRow);
+  const $qianyeTheaterRow = p$('<label>')
+    .css({ display: 'flex', gap: '8px', 'align-items': 'center' })
+    .appendTo($additionalContent);
+  const $qianyeTheater = p$('<input type="checkbox">').appendTo($qianyeTheaterRow);
+  p$('<span>').text('千夜浮梦').appendTo($qianyeTheaterRow);
+  registerMeta('使用当前名称规则，仅修改显示。', $additionalContent).addClass('TH-user-name-meta-left');
 
-  registerMeta('替换显示模式', $globalSec);
+  registerMeta('替换显示模式', $globalSec).addClass('TH-user-name-meta-left');
   const displayModeGroupName = `th_user_name_replace_display_mode_${getScriptId()}`;
   const $displayModeRow = p$('<div>')
     .css({ display: 'flex', gap: '14px', 'align-items': 'center', 'flex-wrap': 'wrap' })
@@ -2770,7 +2862,10 @@ function buildSettingsOverlay(
   const $btnDeleteProfile = registerFlatButton(
     p$('<button type="button">').text('删除').css(btnStyle).appendTo($customToolbarActions),
   );
-  const $bindingControl = p$('<div>').css({ position: 'relative' }).appendTo($customToolbarActions);
+  const $bindingControl = p$('<div>')
+    .addClass('TH-user-name-profile-binding')
+    .css({ position: 'relative' })
+    .appendTo($customToolbarActions);
   const $btnBindProfile = registerFlatButton(
     p$('<button type="button">')
       .attr({ 'aria-haspopup': 'menu', 'aria-expanded': 'false' })
@@ -2778,6 +2873,7 @@ function buildSettingsOverlay(
       .appendTo($bindingControl),
   );
   const $bindingMenu = p$('<div>')
+    .addClass('TH-user-name-profile-binding-menu')
     .attr({ role: 'menu', 'aria-label': '配置绑定角色' })
     .css({
       display: 'none',
@@ -3013,7 +3109,7 @@ function buildSettingsOverlay(
   const refreshBindingControl = () => {
     const profile = getActiveDraftProfile();
     const bindingLabel = profile.binding_type === 'char' ? '角色' : profile.binding_type === 'user' ? '用户' : '';
-    $btnBindProfile.text(profile.binding_type ? `🔗 ${bindingLabel}：${profile.binding_name}` : '🔗 绑定角色');
+    $btnBindProfile.text(profile.binding_type ? `🔗 ${profile.binding_name}` : '🔗 绑定');
     $btnBindProfile.attr(
       'title',
       profile.binding_type
@@ -3094,7 +3190,7 @@ function buildSettingsOverlay(
 
     const $blurredCell = p$('<label>')
       .addClass('TH-user-name-custom-blur-cell')
-      .attr('title', '对这一条规则的替换结果应用 4px 高斯模糊')
+      .attr('title', '对替换结果应用 4px 高斯模糊；文字和图片都留空时只模糊原文字')
       .css({ display: 'flex', alignItems: 'center', justifyContent: 'center' })
       .appendTo($row);
     p$('<input type="checkbox">')
@@ -3337,6 +3433,8 @@ ${scopedRoot} button {
     $contentReplace.prop('checked', s.replace_message_content);
     $headerNames.prop('checked', s.replace_message_header_names);
     $echoTheater.prop('checked', s.replace_echo_theater);
+    $qianyeTheater.prop('checked', s.replace_qianye_theater);
+    $additionalOptions.prop('open', false);
     const displayMode = getDisplayReplaceMode(s);
     $displayTextOnly.prop('checked', displayMode === 'text_only');
     $displayImageOnly.prop('checked', displayMode === 'image_only');
@@ -3394,6 +3492,7 @@ ${scopedRoot} button {
       replace_message_content: $contentReplace.prop('checked'),
       replace_message_header_names: $headerNames.prop('checked'),
       replace_echo_theater: $echoTheater.prop('checked'),
+      replace_qianye_theater: $qianyeTheater.prop('checked'),
       image_replace_whole_word: display_replace_mode === 'image_only',
       display_replace_mode,
       ui_theme: readSelectedTheme(),
@@ -3447,7 +3546,8 @@ ${scopedRoot} button {
   });
   $btnAddThemeProfile.on('click', () => {
     syncActiveThemeDraftFromInputs();
-    const nextIndex = customThemeProfileDrafts.length + 1;
+    let nextIndex = customThemeProfileDrafts.length + 1;
+    while (customThemeProfileDrafts.some(profile => profile.name === `配色${nextIndex}`)) nextIndex++;
     const profile = {
       id: createCustomThemeProfileId(),
       name: `配色${nextIndex}`,
@@ -3535,7 +3635,8 @@ ${scopedRoot} button {
   });
   $btnAddProfile.on('click', () => {
     syncActiveDraftFromRows();
-    const nextIndex = customProfileDrafts.length + 1;
+    let nextIndex = customProfileDrafts.length + 1;
+    while (customProfileDrafts.some(profile => profile.name === `配置${nextIndex}`)) nextIndex++;
     const profile: CustomProfile = {
       id: createCustomProfileId(),
       name: `配置${nextIndex}`,
@@ -4371,7 +4472,41 @@ function init() {
   const parent$ = (window.parent as any).$ ?? $;
   const pWin = window.parent ?? window;
   const pDoc = pWin.document ?? document;
-  const echoTheaterEnhancer = createEchoTheaterEnhancer(getSettings, pDoc, pWin);
+  const destroyCodeBlockCopyEnhancer = createCodeBlockCopyEnhancer(getSettings, pDoc);
+  let echoSettings = getSettings();
+  let echoMatcher: CompiledMatcher | null = null;
+  const echoTheaterEnhancer = createEchoTheaterEnhancer(
+    {
+      prepare: () => {
+        echoSettings = getSettings();
+        echoMatcher =
+          echoSettings.enabled && echoSettings.replace_echo_theater ? compileMatcher(buildRules(echoSettings)) : null;
+        return echoMatcher !== null;
+      },
+      replaceElement: element => applyToTargetElement(parent$(element), echoMatcher, echoSettings),
+      restoreElement: element => restoreElement(parent$(element)),
+    },
+    pDoc,
+    pWin,
+  );
+  let theaterSettings = getSettings();
+  let theaterMatcher: CompiledMatcher | null = null;
+  const qianyeTheaterEnhancer = createQianyeTheaterEnhancer(
+    {
+      isEnabled: () => getSettings().enabled && getSettings().replace_qianye_theater,
+      signature: () => {
+        theaterSettings = getSettings();
+        const rules = buildRules(theaterSettings);
+        theaterMatcher = compileMatcher(rules);
+        return JSON.stringify({ rules, mode: getDisplayReplaceMode(theaterSettings) });
+      },
+      replaceHtml: source => replaceTheaterDisplayHtml(source, theaterMatcher, theaterSettings),
+      replaceElement: element => applyToTargetElement(parent$(element), theaterMatcher, theaterSettings),
+      restoreElement: element => restoreElement(parent$(element)),
+    },
+    pDoc,
+    pWin,
+  );
   const ParentIntersectionObserver = (pWin as any).IntersectionObserver as typeof IntersectionObserver | undefined;
   const ParentMutationObserver = (pWin as any).MutationObserver as typeof MutationObserver | undefined;
   const pendingDisplayedMessageRefreshIds = new Set<number>();
@@ -4408,12 +4543,16 @@ function init() {
   if (ParentMutationObserver && pDoc.body) {
     nestedMessageIframeMountObserver = new ParentMutationObserver(mutations => {
       const frames = new Set<HTMLIFrameElement>();
+      if (mutations.some(mutation => mutation.removedNodes.length > 0)) cleanupDisconnectedNestedIframeDisplayStates();
       mutations.forEach(mutation => {
         mutation.addedNodes.forEach(node => collectMountedMessageIframes(node, frames));
       });
       applyToNewlyMountedMessageIframes(frames);
     });
-    nestedMessageIframeMountObserver.observe(pDoc.body, { childList: true, subtree: true });
+    nestedMessageIframeMountObserver.observe(pDoc.getElementById('chat') ?? pDoc.body, {
+      childList: true,
+      subtree: true,
+    });
   }
 
   const clearPendingDisplayedMessageRefresh = (message_id: number) => {
@@ -4475,8 +4614,10 @@ function init() {
     observedDisplayedMessageElements.clear();
   };
 
+  let messageApplyGeneration = 0;
   const reapply = async () => {
-    restoreAll();
+    const chatScope = getPersistentChatScope();
+    const generation = messageApplyGeneration;
     const s = getSettings();
     let patches: ChatMessagePatch[];
     if (s.enabled && s.replace_message_content) {
@@ -4484,9 +4625,11 @@ function init() {
     } else {
       patches = await restoreAllPersistentMessageContent(s);
     }
+    if (destroyed || chatScope !== getPersistentChatScope() || generation !== messageApplyGeneration) return;
     queueChangedDisplayedMessagesForRefresh(patches);
     applyToAllVisible(s);
     echoTheaterEnhancer.reapply();
+    qianyeTheaterEnhancer.reapply();
   };
 
   const pendingMessageIds = new Set<number>();
@@ -4495,11 +4638,13 @@ function init() {
     if (pendingMessageIds.has(message_id)) return;
     clearPendingDisplayedMessageRefresh(message_id);
     pendingMessageIds.add(message_id);
+    const chatScope = getPersistentChatScope();
+    const generation = messageApplyGeneration;
 
     setTimeout(() => {
       void (async () => {
         try {
-          if (destroyed) return;
+          if (destroyed || chatScope !== getPersistentChatScope() || generation !== messageApplyGeneration) return;
           const s = getSettings();
           let patches: ChatMessagePatch[];
           if (s.enabled && s.replace_message_content) {
@@ -4507,21 +4652,22 @@ function init() {
           } else {
             patches = await restorePersistentMessageContent(message_id, s);
           }
+          if (destroyed || chatScope !== getPersistentChatScope() || generation !== messageApplyGeneration) return;
           queueChangedDisplayedMessagesForRefresh(patches);
           applyToMessageId(message_id, s);
         } catch (error) {
           console.error(`${LOG_PREFIX} 楼层同步失败`, message_id, error);
         } finally {
-          pendingMessageIds.delete(message_id);
+          if (generation === messageApplyGeneration) pendingMessageIds.delete(message_id);
         }
       })();
     }, 0);
   };
 
   const rerenderAll = () => {
+    messageApplyGeneration++;
     pendingMessageIds.clear();
     clearAllPendingDisplayedMessageRefreshes();
-    restoreAll();
     void reapply().catch(error => {
       console.error(`${LOG_PREFIX} 全量同步失败`, error);
     });
@@ -4561,13 +4707,16 @@ function init() {
 
     try {
       await restoreAllPersistentMessageContent(restoreSettings);
-      console.info(`${LOG_PREFIX} ${reason}，已关闭正文同步并恢复原文`);
+      console.info(`${LOG_PREFIX} ${reason}，已关闭正文同步并检查当前聊天的原文备份`);
     } catch (error) {
       console.error(`${LOG_PREFIX} ${reason}时恢复正文失败`, error);
     }
   };
 
   const handleChatChanged = () => {
+    messageApplyGeneration++;
+    pendingMessageIds.clear();
+    clearAllPendingDisplayedMessageRefreshes();
     void (async () => {
       await restoreAndDisablePersistentContentSync('切换聊天');
       if (destroyed) return;
@@ -4642,8 +4791,12 @@ function init() {
   stopList.push(
     eventMakeLast(FHB_MESSAGE_RENDERED_EVENT, (message_id: number) => {
       if (destroyed || !isValidMessageId(message_id)) return;
+      const chatScope = getPersistentChatScope();
+      const generation = messageApplyGeneration;
       setTimeout(() => {
-        if (!destroyed) applyToMessageId(message_id, getSettings());
+        if (!destroyed && chatScope === getPersistentChatScope() && generation === messageApplyGeneration) {
+          applyToMessageId(message_id, getSettings());
+        }
       }, 0);
     }).stop,
   );
@@ -4683,8 +4836,10 @@ function init() {
     clearAllPendingDisplayedMessageRefreshes();
     nestedMessageIframeMountObserver?.disconnect();
     nestedMessageIframeMountObserver = null;
+    destroyCodeBlockCopyEnhancer();
     destroyNestedIframeDisplayEnhancements(true);
     echoTheaterEnhancer.destroy(true);
+    qianyeTheaterEnhancer.destroy(true);
     restoreAll();
     destroyFloatingUi();
     $(window).off(`pagehide${pagehideNs}`);
