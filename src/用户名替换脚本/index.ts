@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { createEchoTheaterEnhancer } from './echo-theater';
+import { materializeGeneratedContent, restoreGeneratedContent } from './generated-content';
 import { createQianyeTheaterEnhancer } from './qianye-theater';
 
 declare const $: any;
@@ -1147,6 +1148,7 @@ function isValidMessageId(message_id: unknown): message_id is number {
 }
 
 function restoreElement($el: any) {
+  if ($el[0]) restoreGeneratedContent($el[0] as HTMLElement);
   if (hasReplacementMarkup($el)) {
     $el.find(`.${REPLACEMENT_CLASS}`).each((_idx: number, element: HTMLElement) => {
       const original = element.getAttribute(ORIGINAL_TEXT_DATA_ATTRIBUTE) ?? element.textContent ?? '';
@@ -1272,10 +1274,7 @@ function isInsideTavernHelperFrontendSource(element: Element): boolean {
   return /html>|<head>|<body/i.test(pre.textContent ?? '');
 }
 
-function shouldSkipReplacementNode(node: Text, root: HTMLElement): boolean {
-  const parent = node.parentElement;
-  if (!parent) return true;
-
+function shouldSkipReplacementElement(parent: HTMLElement, root: HTMLElement): boolean {
   // 普通 Markdown code/pre 仍允许替换；酒馆助手 iframe 的隐藏 HTML 源码必须保持纯文本，
   // 等 iframe 渲染完成后再由 applyToNestedIframe 处理可见内容。
   if (isInsideTavernHelperFrontendSource(parent)) return true;
@@ -1288,6 +1287,10 @@ function shouldSkipReplacementNode(node: Text, root: HTMLElement): boolean {
   // <image> 会被浏览器格式化为空 <img> + tag 文本。必须在 st-chatu8 解析前保护整段 tag，
   // 否则显示层替换与插件的渲染事件存在竞态，插件可能把替换后的名称写进 data-link。
   return isInsideStChatu8SourceTag(parent, root);
+}
+
+function shouldSkipReplacementNode(node: Text, root: HTMLElement): boolean {
+  return !node.parentElement || shouldSkipReplacementElement(node.parentElement, root);
 }
 
 type TextNodeSlice = {
@@ -1451,8 +1454,15 @@ function applyToTargetElement($el: any, matcher: CompiledMatcher | null, setting
     return;
   }
 
-  replaceTextNodesByMatcher($el[0] as HTMLElement, matcher, settings);
-  stabilizeReplacementLayout($el[0] as HTMLElement);
+  const root = $el[0] as HTMLElement;
+  materializeGeneratedContent(
+    root,
+    JSON.stringify(matcher.tokens),
+    text => findNextTokenMatch(text, matcher, 0) !== null,
+    element => shouldSkipReplacementElement(element, root),
+  );
+  replaceTextNodesByMatcher(root, matcher, settings);
+  stabilizeReplacementLayout(root);
 }
 
 type NestedIframeDisplayState = {
