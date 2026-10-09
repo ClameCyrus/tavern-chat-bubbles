@@ -2358,7 +2358,11 @@ function buildSettingsOverlay(
   };
 
   const registerMeta = (text: string, $container: any) => {
-    const $el = p$('<div>').text(text).css({ 'font-size': '12px', 'line-height': '1.6' }).appendTo($container);
+    const $el = p$('<div>')
+      .addClass('TH-user-name-meta')
+      .text(text)
+      .css({ 'font-size': '12px', 'line-height': '1.6' })
+      .appendTo($container);
     themedMetaTexts.push($el);
     return $el;
   };
@@ -2491,7 +2495,7 @@ function buildSettingsOverlay(
     .css({ display: 'flex', gap: '7px', 'align-items': 'center', 'min-width': '0' })
     .appendTo($header);
   const $title = p$('<div>')
-    .text(`替换设置 · V${SCRIPT_VERSION}`)
+    .text('替换设置')
     .css({ 'font-size': '18px', 'font-weight': '700', 'letter-spacing': '0.04em' })
     .appendTo($headerText);
   const $btnHelp = registerFlatButton(
@@ -2580,12 +2584,14 @@ function buildSettingsOverlay(
 
   p$('<div>').text('正文同步替换').css({ 'font-weight': '700', 'margin-top': '4px' }).appendTo($helpModal);
   const $contentSyncWarning = p$('<div>')
+    .addClass('TH-user-name-content-sync-warning')
     .text('正文替换会直接写回聊天记录，因此会改变发送给模型的提示词。')
     .css({ 'font-size': '13px', 'font-weight': '700', 'line-height': '1.7' })
     .appendTo($helpModal);
   themedMetaTexts.push($contentSyncWarning);
   registerMeta('主要使用场景：', $helpModal);
   const $contentSyncCases = p$('<ol>')
+    .addClass('TH-user-name-meta')
     .css({ margin: '0', padding: '0 0 0 22px', display: 'grid', gap: '7px', 'font-size': '12px', 'line-height': '1.7' })
     .appendTo($helpModal);
   p$('<li>')
@@ -2837,6 +2843,7 @@ function buildSettingsOverlay(
     p$('<button type="button">').text('取消').css(btnStyle).appendTo($settingsActions),
   );
   const $btnSave = p$('<button type="button">')
+    .addClass('TH-user-name-save-button')
     .text('保存')
     .css({ ...btnStyle, 'font-weight': '700' })
     .appendTo($settingsActions);
@@ -3255,6 +3262,30 @@ function buildSettingsOverlay(
     const scopedRoot = `.${rootClass}`;
 
     $priorityStyle.text(`
+${scopedRoot} .TH-user-name-replace-modal,
+${scopedRoot} .TH-user-name-replace-help-modal {
+  color: ${palette.textMain} !important;
+}
+${scopedRoot} .TH-user-name-replace-modal *,
+${scopedRoot} .TH-user-name-replace-help-modal * {
+  color: inherit !important;
+  -webkit-text-fill-color: currentColor !important;
+  text-shadow: none !important;
+}
+${scopedRoot} .TH-user-name-replace-modal .TH-user-name-meta,
+${scopedRoot} .TH-user-name-replace-help-modal .TH-user-name-meta {
+  color: ${palette.textSub} !important;
+}
+${scopedRoot} .TH-user-name-replace-help-modal .TH-user-name-content-sync-warning {
+  color: ${palette.accentColor} !important;
+}
+${scopedRoot} .TH-user-name-replace-modal button,
+${scopedRoot} .TH-user-name-replace-help-modal button {
+  color: ${palette.textMain} !important;
+}
+${scopedRoot} .TH-user-name-replace-modal .TH-user-name-save-button {
+  color: ${palette.saveText} !important;
+}
 ${scopedRoot} select,
 ${scopedRoot} input[type="text"],
 ${scopedRoot} input[type="color"],
@@ -3306,6 +3337,11 @@ ${scopedRoot} input[type="checkbox"]:checked {
   border-color: ${palette.accentColor} !important;
   background-color: ${palette.accentColor} !important;
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M3.2 8.2 6.4 11.2 12.8 4.8' fill='none' stroke='white' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") !important;
+}
+${scopedRoot} input[type="checkbox"]::before,
+${scopedRoot} input[type="checkbox"]::after {
+  content: none !important;
+  display: none !important;
 }
 ${scopedRoot} input[type="checkbox"]:focus-visible {
   outline: 2px solid ${palette.accentColor} !important;
@@ -4479,9 +4515,13 @@ function init() {
     {
       prepare: () => {
         echoSettings = getSettings();
-        echoMatcher =
-          echoSettings.enabled && echoSettings.replace_echo_theater ? compileMatcher(buildRules(echoSettings)) : null;
-        return echoMatcher !== null;
+        if (!echoSettings.enabled || !echoSettings.replace_echo_theater) {
+          echoMatcher = null;
+          return null;
+        }
+        const rules = buildRules(echoSettings);
+        echoMatcher = compileMatcher(rules);
+        return echoMatcher ? JSON.stringify({ rules, mode: getDisplayReplaceMode(echoSettings) }) : null;
       },
       replaceElement: element => applyToTargetElement(parent$(element), echoMatcher, echoSettings),
       restoreElement: element => restoreElement(parent$(element)),
