@@ -49,6 +49,7 @@ export interface AppearanceConfig {
   deco_size: string;
   deco_offset: number;
   theme: 'auto' | 'dark' | 'light';
+  protect_appearance: boolean;
   sticker_size: string;
   image_auto_generate: boolean;
   image_width: number;
@@ -94,6 +95,7 @@ export function createDefaultAppearanceConfig(): AppearanceConfig {
     deco_size: '',
     deco_offset: 40,
     theme: 'auto',
+    protect_appearance: true,
     sticker_size: '',
     image_auto_generate: false,
     image_width: 640,
@@ -207,6 +209,7 @@ export function normalizeAppearanceConfig(input: unknown): AppearanceConfig {
     deco_size: asString(wrapped.deco_size),
     deco_offset: Math.max(-100, Math.min(100, asNumber(wrapped.deco_offset, defaults.deco_offset))),
     theme,
+    protect_appearance: asBoolean(wrapped.protect_appearance, defaults.protect_appearance),
     sticker_size: asString(wrapped.sticker_size),
     image_auto_generate: asBoolean(wrapped.image_auto_generate, defaults.image_auto_generate),
     image_width: Math.max(32, Math.round(asNumber(wrapped.image_width, defaults.image_width))),
@@ -285,6 +288,7 @@ export function parseAppearanceConfigText(text: string): AppearanceConfig {
       case 'deco_size': model.deco_size = value; break;
       case 'deco_offset': model.deco_offset = Math.max(-100, Math.min(100, asNumber(value, 40))); break;
       case 'theme': if (['auto', 'dark', 'light'].includes(value)) model.theme = value as AppearanceConfig['theme']; break;
+      case 'protect_appearance': model.protect_appearance = asBoolean(value, model.protect_appearance); break;
       case 'sticker_size': model.sticker_size = value; break;
       case 'image_auto_generate': model.image_auto_generate = asBoolean(value, model.image_auto_generate); break;
       case 'collapse_min': model.collapse_min = Math.max(1, Math.round(asNumber(value, 3))); break;
@@ -372,6 +376,7 @@ export function serializeAppearanceConfigText(input: AppearanceConfig, templateV
     `deco_offset = ${model.deco_offset}`,
     '', '# 六、其它',
     `theme = ${model.theme}`,
+    `protect_appearance = ${model.protect_appearance}`,
     `sticker_size = ${cleanLine(model.sticker_size)}`,
     `image_auto_generate = ${model.image_auto_generate}`,
     `image_size = ${model.image_width}x${model.image_height}`,

@@ -1,13 +1,16 @@
 import { createApp } from 'vue';
 import { createScriptIdIframe, teleportStyle } from '@util/script';
 import AppearancePanel from './AppearancePanel.vue';
+import { protectBubbleStyles } from './style-protection';
+import { buildOutputFormat, DEFAULT_OUTPUT_RULES, loadOutputRules, saveOutputRules } from './output-format';
 import {
     parseAppearanceConfigText,
     serializeAppearanceConfigText
 } from './appearance-config';
 
 // ============================================================
-// 线上聊天气泡_通用版 v15.7
+// 线上聊天气泡_通用版 v15.8
+// v15.8：可切换外观保护；输出规则面板编辑、独立保存与恢复默认；动画禁用时保持可见
 // 变更：世界书读写保留完整书名；跳过失效引用，读取失败不再逐条触发斜杠查询或误补条目
 // v15.6：新增 NPC 通用头像，作为未设置单独头像的 NPC 的兜底；均留空时使用名字文字头像
 // v15.5：语音/表情装饰锚定本体；可关闭 image 自动生图；移动端折叠操作改为紧凑组合
@@ -31,7 +34,7 @@ const FHB_STYLE_ID = 'fhb-style-chatbubble';
 const FHB_MESSAGE_RENDERED_EVENT = 'fhb_message_rendered';
 
 function initChatBubbles() {
-    const CONF_VERSION = 'v15.6';
+    const CONF_VERSION = 'v15.8';
 
     const CONFIG = {
         // —— 以下带 * 的项均可被世界书「外观配置」条目覆盖，注释掉即回退到此处默认 ——
@@ -52,6 +55,7 @@ function initChatBubbles() {
         DECO_SIZE: '',          // * 装饰宽度
         DECO_OFFSET: '',        // * 装饰外移比例 -100~100
         BUBBLE: {},             // * bubble.<user|char|npc>.<bg|tx|bd|bs|bw|ra>
+        PROTECT_APPEARANCE: true, // * 防止主题和其他楼层组件覆盖气泡布局与外观
         LAYOUT: {               // * 气泡整体尺寸与排版
             scale: 1,
             fontSize: 14.5,
@@ -97,7 +101,7 @@ function initChatBubbles() {
     const CONFIGURABLE_KEYS = [
         'USER_AVATAR', 'CHAR_AVATAR', 'NPC_AVATAR', 'NPC_AVATARS', 'NPC_ALIASES',
         'ACCENT_DARK', 'ACCENT_LIGHT', 'ACCENT2_DARK', 'ACCENT2_LIGHT',
-        'CHAR_EXTRA_ALIASES', 'DECO', 'DECO_SIZE', 'DECO_OFFSET', 'BUBBLE', 'LAYOUT',
+        'CHAR_EXTRA_ALIASES', 'DECO', 'DECO_SIZE', 'DECO_OFFSET', 'BUBBLE', 'LAYOUT', 'PROTECT_APPEARANCE',
         'STICKER_SIZE', 'IMAGE_AUTO_GENERATE', 'theme', 'imgW', 'imgH', 'collapseMin', 'STREAM_MODE'
     ];
     const FACTORY = {};
@@ -516,56 +520,6 @@ function initChatBubbles() {
     // ============================================================
     // 世界书模块（v14：三道闸门 + 静默自动注入）
     // ============================================================
-    const MACRO_CHAR = '{' + '{char}}';
-
-    const FORMAT_TEXT =
-`<party_chat_format>
-# 线上聊天输出格式
-
-当剧情中角色通过手机、社交软件、短信、群聊等线上方式交流时，聊天内容必须以固定格式逐条输出，每行一条，行与行之间用空行隔开，禁止包裹在代码块中。非线上对话场景不得使用本格式，保持正常正文叙述。聊天块前后可以正常穿插中文叙事描写。
-
-本格式适用于剧情里任何两个人（或一群人）之间的线上对话，包括：角色与{{user}}的私聊、${MACRO_CHAR}与NPC的私聊、NPC之间的私聊、多人参与的群聊、对某个角色手机屏幕的描写。若${MACRO_CHAR}是多人卡或世界观卡，${MACRO_CHAR}自身可以不是对话参与者，一律按实际说话的人填写发送方。角色名不限制语言。
-
-【固定格式】
-[类型|发送方|接收方|内容|附加|时间]
-- 附加与时间可省略：可为 [类型|发送方|接收方|内容|时间] 或 [类型|发送方|接收方|内容]。
-- 每条聊天条目必须顶格独立成行，行首禁止加空格或缩进。
-- 任一字段内部禁止出现竖线与方括号。
-- 时间统一使用 24 小时制 HH:MM，如 23:14。
-- 发送方写法：{{user}}一方写 {{user}}；其余一律写该角色的名字（与剧情中的称呼一致）。
-- 接收方写法：发给{{user}}时写 {{user}}；发给其他角色写对方名字；群聊写固定群名。
-- text 类型的语言风格遵循角色卡自身设定（如角色卡要求双语台词，则照旧成对写入内容字段）。
-
-【类型语义】
-- text：内容为消息文本；附加可写状态词（已读/未读/送达失败），无则留空。
-- voice：内容为语音的听觉转写文字；附加为时长，如 12"。
-- transfer：内容为金额数字，如 500.00；附加为转账备注。
-- redpacket：内容为红包祝福语；附加为状态（已领取/待领取）。
-- image：内容为一句中文图片描述；附加为一到三个英文取图关键词，逗号分隔，如 bar,neon,night。
-- sticker：内容为一个表情包名称、表情符号或颜文字；附加可写贴纸吐槽文字。若存在表情包名录，优先从名录中挑选名称填入内容字段。
-- call：内容为通话结果，如 通话时长 3:24 或 未接听；附加写 语音通话 或 视频通话。
-- location：内容为地点名；附加为所在区域或街区。
-- file：内容为文件名；附加为文件大小或说明。
-- system：内容为系统提示，如 某人 撤回了一条消息；接收方字段留空。
-- typing：内容与附加留空，表示对方正在输入，用于制造停顿与悬念。
-
-【输出示例】（名字仅为格式演示，实际输出使用剧情中的真实角色名）
-
-[text|林恩|{{user}}|你在哪里？楼下风很大。|已读|23:14]
-
-[sticker|{{user}}|林恩|🙄|翻个大白眼|23:15]
-
-[typing|林恩|{{user}}|23:16]
-
-[text|Robin|Mika|明天老地方，别迟到。|已读|21:07]
-
-[system|Robin||Robin 邀请 Mika 加入了群聊|22:03]
-
-[redpacket|Robin|周末小队|恭贺乔迁！|待领取|22:04]
-
-[image|Mika|周末小队|凌晨三点的吧台只剩霓虹还亮着|bar,neon,night|22:07]
-</party_chat_format>`;
-
     const STICKER_LIB_DEFAULT =
 `# ============================================
 # 表情包链接库
@@ -710,6 +664,9 @@ message_spacing = 14
 # ------------------------------------------------------------
 # 配色跟随：auto 自动判断你的酒馆是深色还是浅色 / dark 强制深色 / light 强制浅色
 theme = auto
+
+# 开启后保护气泡布局、圆角、描边与阴影；关闭后允许酒馆主题改变外观。
+protect_appearance = true
 
 # 表情包图片宽度，留空为自适应。填法：120px
 sticker_size =
@@ -1549,10 +1506,11 @@ stream_mode = defer`;
                 return;
             }
 
-            if (kl === 'image_auto_generate') {
+            if (kl === 'image_auto_generate' || kl === 'protect_appearance') {
+                const key = kl === 'protect_appearance' ? 'PROTECT_APPEARANCE' : 'IMAGE_AUTO_GENERATE';
                 const t = v.toLowerCase();
-                if (['true', '1', 'yes', 'on', '是', '开启'].includes(t)) CONFIG.IMAGE_AUTO_GENERATE = true;
-                if (['false', '0', 'no', 'off', '否', '关闭'].includes(t)) CONFIG.IMAGE_AUTO_GENERATE = false;
+                if (['true', '1', 'yes', 'on', '是', '开启'].includes(t)) CONFIG[key] = true;
+                if (['false', '0', 'no', 'off', '否', '关闭'].includes(t)) CONFIG[key] = false;
                 return;
             }
             if (!v) return;
@@ -1716,7 +1674,16 @@ stream_mode = defer`;
 
             // 4. 格式条目：随脚本强制启用并更新
             if (CONFIG.AUTO_INJECT_WI || manual) {
-                const fmtRoute = await routedUpsert(SPEC.format, FORMAT_TEXT, CONFIG.WI_FORCE_UPDATE || manual);
+                const localFormat = await findEntry(book, SPEC.format.title);
+                const formatBook = localFormat ? book : (guardEntries[SPEC.format.title]?.book || homeBook);
+                const savedFormat = loadOutputRules(formatBook);
+                const formatText = buildOutputFormat(savedFormat.rules);
+                const fmtRoute = await routedUpsert(SPEC.format, formatText, CONFIG.WI_FORCE_UPDATE || manual || savedFormat.managed);
+                if (fmtRoute.result === 'external' && savedFormat.managed) {
+                    fmtRoute.result = await upsertEntry(fmtRoute.book, SPEC.format, formatText, true);
+                    verifiedBooks.add(fmtRoute.book);
+                    if (fmtRoute.result === 'failed') failedBooks.add(fmtRoute.book);
+                }
                 const fmtRes = fmtRoute.result;
                 if (fmtRes === 'created') { report.push({ book: fmtRoute.book, label: '聊天格式条目' }); wrote = true; }
                 else if (fmtRes === 'updated') wrote = true;
@@ -1937,7 +1904,8 @@ stream_mode = defer`;
         }
         const content = (rest[0] || '').trim();
         const extra = rest.slice(1).join('|').trim();
-        const delayStyle = noAnim ? '' : ` style="animation-delay:${Math.min(idx * 50, 400)}ms"`;
+        const delay = Math.min(idx * 50, 400);
+        const delayStyle = noAnim ? '' : ` style="animation-delay:${delay}ms;--fhb-entry-delay:${delay}ms"`;
 
         if (type === 'system') {
             if (!content) return null;
@@ -2464,7 +2432,7 @@ stream_mode = defer`;
     function buildCSS(p) {
         return `
 .fhb-msg,.fhb-sys,.fhb-thread{${tokenCSS(p)}--fhb-serif:Didot,'Bodoni MT','Playfair Display','Songti SC','STSong',Georgia,serif;--fhb-sans:'Helvetica Neue','Avenir Next',Arial,'PingFang SC','Microsoft YaHei',sans-serif;--fhb-trans:all .28s cubic-bezier(.22,.61,.36,1);zoom:var(--fhb-scale,1);}
-.fhb-msg{display:flex;align-items:flex-start;gap:var(--fhb-msg-gap,11px);margin:var(--fhb-msg-spacing,14px) 2px;opacity:0;animation:fhbIn .5s ease forwards;font-family:var(--fhb-sans);color:var(--fhb-ink);max-width:100%;}
+.fhb-msg{display:flex;align-items:flex-start;gap:var(--fhb-msg-gap,11px);margin:var(--fhb-msg-spacing,14px) 2px;opacity:1;animation:fhbIn .5s ease both;animation-delay:var(--fhb-entry-delay,0ms);font-family:var(--fhb-sans);color:var(--fhb-ink);max-width:100%;}
 .fhb-msg.fhb-user{flex-direction:row-reverse;}
 [data-fhb-noanim="1"] .fhb-msg,[data-fhb-noanim="1"] .fhb-sys,[data-fhb-noanim="1"] .fhb-thread{animation:none!important;opacity:1!important;}
 [data-fhb-noanim="1"] .fhb-bubble{transition:none!important;}
@@ -2587,7 +2555,7 @@ stream_mode = defer`;
 .fhb-file-col{min-width:0;flex:1;}
 .fhb-file-name{font-size:13.5px;font-weight:600;max-width:100%;overflow-wrap:anywhere;word-break:break-word;white-space:normal;}
 .fhb-file-sub{font-size:11px;color:var(--fhb-meta);margin-top:1px;}
-.fhb-sys{display:flex;align-items:center;justify-content:center;gap:12px;margin:16px 8px;opacity:0;animation:fhbIn .4s ease forwards;font-family:var(--fhb-sans);}
+.fhb-sys{display:flex;align-items:center;justify-content:center;gap:12px;margin:16px 8px;opacity:1;animation:fhbIn .4s ease both;animation-delay:var(--fhb-entry-delay,0ms);font-family:var(--fhb-sans);}
 .fhb-sys::before,.fhb-sys::after{content:'';flex:1;max-width:120px;background:linear-gradient(90deg,transparent,var(--fhb-hairline),transparent);height:1px;}
 .fhb-sys-cap{font-size:11px;letter-spacing:.08em;color:var(--fhb-meta);padding:3px 12px;border:1px solid var(--fhb-hairline);border-radius:999px;background:transparent;white-space:nowrap;}
 .fhb-sys-time{font-size:10px;color:var(--fhb-meta);font-variant-numeric:tabular-nums;}
@@ -2596,7 +2564,7 @@ stream_mode = defer`;
 .fhb-dots circle{fill:currentColor;animation:fhbDot 1.2s ease-in-out infinite;}
 .fhb-dots circle:nth-child(2){animation-delay:.18s;}
 .fhb-dots circle:nth-child(3){animation-delay:.36s;}
-.fhb-thread{position:relative;margin:18px auto;border:1px solid var(--fhb-accent2);border-top:2px solid var(--fhb-accent);border-radius:16px;overflow:hidden;background:var(--fhb-card-bg);box-shadow:var(--fhb-card-shadow);opacity:0;animation:fhbIn .5s ease forwards;font-family:var(--fhb-sans);color:var(--fhb-ink);max-width:min(92%,520px);}
+.fhb-thread{position:relative;margin:18px auto;border:1px solid var(--fhb-accent2);border-top:2px solid var(--fhb-accent);border-radius:16px;overflow:hidden;background:var(--fhb-card-bg);box-shadow:var(--fhb-card-shadow);opacity:1;animation:fhbIn .5s ease both;font-family:var(--fhb-sans);color:var(--fhb-ink);max-width:min(92%,520px);}
 .fhb-th-head{position:relative;display:flex;align-items:center;gap:10px;width:100%;text-align:left;appearance:none;background:var(--fhb-card-head);border:none;border-bottom:1px dashed var(--fhb-hairline);border-radius:14px 14px 0 0;padding:11px 78px 11px 14px;cursor:pointer;color:var(--fhb-ink);font:inherit;transition:var(--fhb-trans);}
 .fhb-thread:not(.open) .fhb-th-head{border-radius:14px;}
 .fhb-th-head:hover{background:var(--fhb-card-head-h);}
@@ -2706,7 +2674,8 @@ stream_mode = defer`;
 
         const style = PD.createElement('style');
         style.id = FHB_STYLE_ID;
-        style.textContent = buildCSS(p);
+        const css = buildCSS(p);
+        style.textContent = CONFIG.PROTECT_APPEARANCE ? protectBubbleStyles(css) : css;
         PD.head.appendChild(style);
     }
 
@@ -2980,21 +2949,61 @@ stream_mode = defer`;
 
     async function loadAppearancePanelConfig() {
         const located = await locateAppearanceConfig();
+        const formatBook = await locateOutputFormatBook(located.primaryBook);
         STK.sources[SPEC.conf.title] = located.book;
         return {
             book: located.book,
-            config: parseAppearanceConfigText(located.content)
+            config: parseAppearanceConfigText(located.content),
+            outputRules: loadOutputRules(formatBook).rules ?? DEFAULT_OUTPUT_RULES
         };
     }
 
-    async function saveAppearancePanelConfig(model) {
+    async function locateOutputFormatBook(primaryBook) {
+        if (await findEntry(primaryBook, SPEC.format.title)) return primaryBook;
+        const scan = await scanInjectionGuardEntries(primaryBook);
+        if (scan.hits[SPEC.format.title]) return scan.hits[SPEC.format.title].book;
+        if (scan.unreadableBooks.length) {
+            throw Error('部分世界书无法读取，无法确认输出格式条目的位置。请检查世界书后重试。');
+        }
+        return resolveInjectionHomeBook(primaryBook, scan);
+    }
+
+    async function writeOutputFormat(book, rules) {
+        const result = await upsertEntry(book, SPEC.format, buildOutputFormat(rules), true);
+        if (result === 'failed') throw Error(`无法写入世界书「${book}」中的输出格式条目。`);
+        saveOutputRules(book, rules);
+        STK.sources[SPEC.format.title] = book;
+        STK.lastWrite = Date.now();
+    }
+
+    async function resetOutputFormat() {
+        if (STK.busy) throw Error('世界书正在更新，请稍后再恢复默认。');
+        if (!hasActiveChat()) throw Error('当前没有打开角色聊天。');
+        const primaryBook = await resolveBookName();
+        if (!primaryBook || !(await worldbookExists(primaryBook))) throw Error('请先为当前角色绑定一本已存在的世界书。');
+        STK.busy = true;
+        try {
+            await writeOutputFormat(await locateOutputFormatBook(primaryBook), null);
+            console.info('[聊天气泡] 输出格式已恢复默认；外观配置保持不变。');
+        } finally {
+            STK.busy = false;
+        }
+    }
+
+    async function saveAppearancePanelConfig(model, rules) {
         if (STK.busy) throw Error('世界书正在更新，请稍后再保存。');
         STK.busy = true;
         try {
             const located = await locateAppearanceConfig();
+            const formatBook = await locateOutputFormatBook(located.primaryBook);
             const content = serializeAppearanceConfigText(model, CONF_VERSION);
             const result = await upsertEntry(located.book, SPEC.conf, content, true);
             if (result === 'failed') throw Error(`无法写入世界书「${located.book}」，请检查世界书权限。`);
+            try {
+                await writeOutputFormat(formatBook, rules);
+            } catch (error) {
+                throw Error('外观配置已保存，但输出规则未能保存并注入。请重试保存。', { cause: error });
+            }
 
             STK.sources[SPEC.conf.title] = located.book;
             STK.lastWrite = Date.now();
@@ -3004,7 +3013,7 @@ stream_mode = defer`;
             refreshVisuals();
             processAll({ force: true });
             console.info(`[聊天气泡] 外观配置已由可视化面板保存到「${located.book}」并应用。`);
-            toastMsg('外观配置已保存并应用。', 'success');
+            toastMsg('外观配置已应用，输出规则已保存并注入。', 'success');
             return { book: located.book };
         } finally {
             STK.busy = false;
@@ -3069,6 +3078,7 @@ stream_mode = defer`;
                 const api = {
                     load: loadAppearancePanelConfig,
                     save: saveAppearancePanelConfig,
+                    resetOutputFormat,
                     close: closeAppearancePanel
                 };
                 const app = createApp(AppearancePanel, { api });

@@ -1,5 +1,8 @@
+import { protectBubbleStyles } from '../线上聊天气泡_通用版/style-protection';
+
 // ============================================================
 // 芙林_聊天气泡_专属版 v14
+// 兼容修复：动画禁用时保持可见；protect_appearance 控制主题与状态栏样式保护
 // v14：同步通用版 v15.5 的尺寸配置、移动端修复、媒体装饰锚点、image 开关与折叠卡片（不含可视化面板）
 // v13：确认角色主世界书已导入后才查找和注入，不扫描其它世界书
 // v12：用户名替换在气泡渲染后自动补应用；消息编辑完成后可靠重渲染；用户气泡内文字左对齐
@@ -36,6 +39,7 @@ function initFlynnChatBubbles() {
     DECO_SIZE: '', // * 装饰宽度
     DECO_OFFSET: '', // * 装饰外移比例 -100~100
     BUBBLE: {}, // * bubble.<user|char|npc>.<bg|tx|bd|bs|bw>
+    PROTECT_APPEARANCE: true, // * 防止主题和状态栏覆盖气泡外观
     LAYOUT: { // * 气泡整体尺寸与排版
       scale: 1,
       fontSize: 14.5,
@@ -102,6 +106,7 @@ function initFlynnChatBubbles() {
     'DECO_SIZE',
     'DECO_OFFSET',
     'BUBBLE',
+    'PROTECT_APPEARANCE',
     'LAYOUT',
     'STICKER_SIZE',
     'IMAGE_AUTO_GENERATE',
@@ -785,6 +790,9 @@ message_spacing = 14
 # ------------------------------------------------------------
 # 配色跟随：auto 自动判断你的酒馆是深色还是浅色 / dark 强制深色 / light 强制浅色
 theme = auto
+
+# 开启后保护气泡布局、圆角、描边与阴影；关闭后允许酒馆主题改变外观。
+protect_appearance = true
 
 # 表情包图片宽度，留空为自适应。填法：120px
 sticker_size =
@@ -1528,10 +1536,11 @@ stream_mode = defer`;
         return;
       }
 
-      if (kl === 'image_auto_generate') {
+      if (kl === 'image_auto_generate' || kl === 'protect_appearance') {
+        const key = kl === 'protect_appearance' ? 'PROTECT_APPEARANCE' : 'IMAGE_AUTO_GENERATE';
         const t = v.toLowerCase();
-        if (['true', '1', 'yes', 'on', '是', '开启'].includes(t)) CONFIG.IMAGE_AUTO_GENERATE = true;
-        if (['false', '0', 'no', 'off', '否', '关闭'].includes(t)) CONFIG.IMAGE_AUTO_GENERATE = false;
+        if (['true', '1', 'yes', 'on', '是', '开启'].includes(t)) CONFIG[key] = true;
+        if (['false', '0', 'no', 'off', '否', '关闭'].includes(t)) CONFIG[key] = false;
         return;
       }
       if (!v) return;
@@ -1917,7 +1926,8 @@ stream_mode = defer`;
     }
     const content = (rest[0] || '').trim();
     const extra = rest.slice(1).join('|').trim();
-    const delayStyle = noAnim ? '' : ` style="animation-delay:${Math.min(idx * 50, 400)}ms"`;
+    const delay = Math.min(idx * 50, 400);
+    const delayStyle = noAnim ? '' : ` style="animation-delay:${delay}ms;--fhb-entry-delay:${delay}ms"`;
 
     if (type === 'system') {
       if (!content) return null;
@@ -2462,7 +2472,7 @@ stream_mode = defer`;
   function buildCSS(p) {
     return `
 .fhb-msg,.fhb-sys,.fhb-thread{${tokenCSS(p)}--fhb-serif:Didot,'Bodoni MT','Playfair Display','Songti SC','STSong',Georgia,serif;--fhb-sans:'Helvetica Neue','Avenir Next',Arial,'PingFang SC','Microsoft YaHei',sans-serif;--fhb-trans:all .28s cubic-bezier(.22,.61,.36,1);zoom:var(--fhb-scale,1);}
-.fhb-msg{display:flex;align-items:flex-start;gap:var(--fhb-msg-gap,11px);margin:var(--fhb-msg-spacing,14px) 2px;opacity:0;animation:fhbIn .5s ease forwards;font-family:var(--fhb-sans);color:var(--fhb-ink);max-width:100%;}
+.fhb-msg{display:flex;align-items:flex-start;gap:var(--fhb-msg-gap,11px);margin:var(--fhb-msg-spacing,14px) 2px;opacity:1;animation:fhbIn .5s ease both;animation-delay:var(--fhb-entry-delay,0ms);font-family:var(--fhb-sans);color:var(--fhb-ink);max-width:100%;}
 .fhb-msg.fhb-user{flex-direction:row-reverse;}
 [data-fhb-noanim="1"] .fhb-msg,[data-fhb-noanim="1"] .fhb-sys,[data-fhb-noanim="1"] .fhb-thread{animation:none!important;opacity:1!important;}
 [data-fhb-noanim="1"] .fhb-bubble,[data-fhb-noanim="1"] .fhb-bubble-wrap{transition:none!important;}
@@ -2595,7 +2605,7 @@ stream_mode = defer`;
 .fhb-file-col{min-width:0;flex:1;}
 .fhb-file-name{font-size:13.5px;font-weight:600;max-width:100%;overflow-wrap:anywhere;word-break:break-word;white-space:normal;}
 .fhb-file-sub{font-size:11px;color:var(--fhb-meta);margin-top:1px;}
-.fhb-sys{display:flex;align-items:center;justify-content:center;gap:12px;margin:16px 8px;opacity:0;animation:fhbIn .4s ease forwards;font-family:var(--fhb-sans);}
+.fhb-sys{display:flex;align-items:center;justify-content:center;gap:12px;margin:16px 8px;opacity:1;animation:fhbIn .4s ease both;animation-delay:var(--fhb-entry-delay,0ms);font-family:var(--fhb-sans);}
 .fhb-sys::before,.fhb-sys::after{content:'';flex:1;max-width:120px;background:linear-gradient(90deg,transparent,var(--fhb-hairline),transparent);height:1px;}
 .fhb-sys-cap{font-size:11px;letter-spacing:.08em;color:var(--fhb-meta);padding:3px 12px;border:1px solid var(--fhb-hairline);border-radius:999px;background:transparent;white-space:nowrap;}
 .fhb-sys-time{font-size:10px;color:var(--fhb-meta);font-variant-numeric:tabular-nums;}
@@ -2604,7 +2614,7 @@ stream_mode = defer`;
 .fhb-dots circle{fill:currentColor;animation:fhbDot 1.2s ease-in-out infinite;}
 .fhb-dots circle:nth-child(2){animation-delay:.18s;}
 .fhb-dots circle:nth-child(3){animation-delay:.36s;}
-.fhb-thread{position:relative;margin:18px auto;border:1px solid var(--fhb-gold);border-top:2px solid var(--fhb-red);border-radius:16px;overflow:hidden;background:var(--fhb-card-bg);box-shadow:var(--fhb-card-shadow);opacity:0;animation:fhbIn .5s ease forwards;font-family:var(--fhb-sans);color:var(--fhb-ink);max-width:min(92%,520px);}
+.fhb-thread{position:relative;margin:18px auto;border:1px solid var(--fhb-gold);border-top:2px solid var(--fhb-red);border-radius:16px;overflow:hidden;background:var(--fhb-card-bg);box-shadow:var(--fhb-card-shadow);opacity:1;animation:fhbIn .5s ease both;font-family:var(--fhb-sans);color:var(--fhb-ink);max-width:min(92%,520px);}
 .fhb-th-head{position:relative;display:flex;align-items:center;gap:10px;width:100%;text-align:left;appearance:none;background:var(--fhb-card-head);border:none;border-bottom:1px dashed var(--fhb-hairline);border-radius:14px 14px 0 0;padding:11px 78px 11px 14px;cursor:pointer;color:var(--fhb-ink);font:inherit;transition:var(--fhb-trans);}
 .fhb-thread:not(.open) .fhb-th-head{border-radius:14px;}
 .fhb-th-head:hover{background:var(--fhb-card-head-h);}
@@ -2751,7 +2761,8 @@ stream_mode = defer`;
 
     const style = PD.createElement('style');
     style.id = FHB_STYLE_ID;
-    style.textContent = buildCSS(p);
+    const css = buildCSS(p);
+    style.textContent = CONFIG.PROTECT_APPEARANCE ? protectBubbleStyles(css) : css;
     PD.head.appendChild(style);
   }
 

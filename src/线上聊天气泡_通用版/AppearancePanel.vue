@@ -13,10 +13,12 @@ import {
 } from './appearance-config';
 import ColorField from './ColorField.vue';
 import ImageField from './ImageField.vue';
+import { DEFAULT_OUTPUT_RULES, FIXED_OUTPUT_STRUCTURE, importOutputRules, normalizeOutputRules } from './output-format';
 
 interface PanelApi {
-  load: () => Promise<{ book: string; config: AppearanceConfig }>;
-  save: (config: AppearanceConfig) => Promise<{ book: string }>;
+  load: () => Promise<{ book: string; config: AppearanceConfig; outputRules: string }>;
+  save: (config: AppearanceConfig, rules: string) => Promise<{ book: string }>;
+  resetOutputFormat: () => Promise<void>;
   close: () => void;
 }
 
@@ -24,7 +26,10 @@ const props = defineProps<{ api: PanelApi }>();
 const config = ref<AppearanceConfig>(normalizeAppearanceConfig({}));
 const book = ref('');
 const busy = ref(false);
-const dirty = ref(false);
+const outputRules = ref(DEFAULT_OUTPUT_RULES);
+const appearanceDirty = ref(false);
+const rulesDirty = ref(false);
+const dirty = computed(() => appearanceDirty.value || rulesDirty.value);
 const message = ref('正在读取世界书…');
 const messageKind = ref<'info' | 'success' | 'error'>('info');
 const importRef = ref<HTMLInputElement | null>(null);
@@ -41,8 +46,9 @@ const cornerLabels: Record<DecoCorner, string> = { tl: '左上', tr: '右上', b
 const borderStyles = ['solid', 'dashed', 'dotted', 'double', 'groove', 'ridge', 'none', 'slash'];
 
 watch(config, () => {
-  if (ready) dirty.value = true;
+  if (ready) appearanceDirty.value = true;
 }, { deep: true });
+watch(outputRules, () => { if (ready) rulesDirty.value = true; });
 
 function notify(text: string, kind: 'info' | 'success' | 'error' = 'info') {
   message.value = text;
@@ -55,8 +61,10 @@ async function load() {
     const result = await props.api.load();
     ready = false;
     config.value = normalizeAppearanceConfig(result.config);
+    outputRules.value = result.outputRules;
     book.value = result.book;
-    dirty.value = false;
+    appearanceDirty.value = false;
+    rulesDirty.value = false;
     notify(`已读取世界书「${result.book}」`, 'success');
     await nextTick();
     ready = true;
@@ -70,10 +78,11 @@ async function load() {
 async function save() {
   busy.value = true;
   try {
-    const result = await props.api.save(normalizeAppearanceConfig(config.value));
+    const result = await props.api.save(normalizeAppearanceConfig(config.value), outputRules.value);
     book.value = result.book;
-    dirty.value = false;
-    notify(`已保存到世界书「${result.book}」并应用`, 'success');
+    appearanceDirty.value = false;
+    rulesDirty.value = false;
+    notify('外观配置已应用，输出规则已保存并注入世界书。', 'success');
   } catch (error) {
     notify(error instanceof Error ? error.message : '保存配置失败。', 'error');
   } finally {
@@ -90,11 +99,16 @@ function addNpcAlias() {
 }
 
 function exportConfig() {
-  const blob = new Blob([JSON.stringify(createAppearanceExport(config.value), null, 2)], { type: 'application/json' });
+  const exported = {
+    ...createAppearanceExport(config.value),
+    version: 2,
+    output_format: { rules: normalizeOutputRules(outputRules.value) },
+  };
+  const blob = new Blob([JSON.stringify(exported, null, 2)], { type: 'application/json' });
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement('a');
   anchor.href = url;
-  anchor.download = `聊天气泡外观配置-${new Date().toISOString().slice(0, 10)}.json`;
+  anchor.download = `聊天气泡配置-${new Date().toISOString().slice(0, 10)}.json`;
   anchor.click();
   URL.revokeObjectURL(url);
   notify('配置已导出。', 'success');
@@ -108,15 +122,39 @@ async function importConfig(event: Event) {
   try {
     const text = await file.text();
     let next: AppearanceConfig;
+    let nextRules = outputRules.value;
+    let parsed: unknown;
     try {
-      next = normalizeAppearanceConfig(JSON.parse(text));
+      parsed = JSON.parse(text);
     } catch {
-      next = parseAppearanceConfigText(text);
+      parsed = null;
     }
+    if (parsed !== null) {
+      next = normalizeAppearanceConfig(parsed);
+      nextRules = importOutputRules(parsed, outputRules.value);
+    } else next = parseAppearanceConfigText(text);
     config.value = next;
+    outputRules.value = nextRules;
     notify(`已导入「${file.name}」，保存后才会写入世界书。`, 'success');
   } catch {
-    notify('导入失败：文件不是有效的 JSON 或外观配置文本。', 'error');
+    notify('导入失败：请检查配置文件及输出规则内容。', 'error');
+  }
+}
+
+async function restoreOutputFormat() {
+  busy.value = true;
+  try {
+    await props.api.resetOutputFormat();
+    ready = false;
+    outputRules.value = DEFAULT_OUTPUT_RULES;
+    await nextTick();
+    ready = true;
+    rulesDirty.value = false;
+    notify('输出格式已恢复默认并注入世界书，外观配置保持不变。', 'success');
+  } catch (error) {
+    notify(error instanceof Error ? error.message : '恢复默认输出格式失败。', 'error');
+  } finally {
+    busy.value = false;
   }
 }
 
@@ -247,6 +285,8 @@ onUnmounted(() => {
 </script>
 
 <template>
+  <!-- eslint-disable better-tailwindcss/no-unknown-classes -->
+  <!-- 独立 iframe 使用下方定义的本地 CSS，不使用 Tailwind 类名。 -->
   <div ref="overlayRef" class="fhbc-overlay" @mousedown.self="api.close">
     <main class="fhbc-panel" role="dialog" aria-modal="true" aria-label="聊天气泡外观配置">
       <header class="fhbc-header">
@@ -273,6 +313,7 @@ onUnmounted(() => {
               <label class="fhbc-field"><span>配色模式</span><select v-model="config.theme" class="fhbc-input"><option value="auto">跟随酒馆</option><option value="dark">深色</option><option value="light">浅色</option></select></label>
               <label class="fhbc-field"><span>流式渲染</span><select v-model="config.stream_mode" class="fhbc-input"><option value="defer">生成后渲染（推荐）</option><option value="live">边生成边渲染</option></select></label>
               <label class="fhbc-field"><span>折叠起始条数</span><input v-model.number="config.collapse_min" class="fhbc-input" type="number" min="1" max="99" /></label>
+              <label class="fhbc-field"><span>保护外观</span><select v-model="config.protect_appearance" class="fhbc-input"><option :value="true">开启</option><option :value="false">关闭，跟随主题</option></select><small>保护气泡布局、圆角、描边及阴影，避免主题或状态栏覆盖；关闭后允许外部样式影响外观。</small></label>
             </div>
             <div class="fhbc-grid cols-2">
               <ColorField v-model="config.accent_dark" label="深色 · 主色" fallback="#57a3c9" />
@@ -297,6 +338,17 @@ onUnmounted(() => {
                 <label class="fhbc-field"><span>气泡圆角</span><input v-model="config.bubble[actor].border_radius" class="fhbc-input" placeholder="如 14px；0 为直角" /></label>
               </div>
             </article>
+          </div>
+        </details>
+
+        <details class="fhbc-section">
+          <summary>线上聊天输出规则</summary>
+          <div class="fhbc-section-body">
+            <p>可修改使用场景、填写规则、类型说明和示例。保存后注入世界书；改出问题可单独恢复默认格式。</p>
+            <details><summary>固定格式（不可修改）</summary><pre class="fhbc-fixed-format">{{ FIXED_OUTPUT_STRUCTURE }}</pre></details>
+            <label class="fhbc-field"><span>规则说明</span><textarea v-model="outputRules" class="fhbc-input fhbc-rules-editor" rows="18" spellcheck="false" /></label>
+            <button type="button" class="fhbc-button ghost" :disabled="busy" @click="restoreOutputFormat">恢复默认输出格式</button>
+            <p class="fhbc-book">仅恢复输出规则并更新格式条目，保留头像、配色及其他外观设置。</p>
           </div>
         </details>
 
@@ -423,4 +475,6 @@ onUnmounted(() => {
 .fhbc-dirty{color:#d79630;font-size:12px}.fhbc-saved{color:#42b77e;font-size:12px}.fhbc-footer>div{display:flex;gap:9px}
 @media(max-width:720px){.fhbc-overlay{padding:0}.fhbc-panel{height:100dvh;max-height:100dvh;border-radius:0;border-left:0;border-right:0}.fhbc-header,.fhbc-footer{padding:13px 14px}.fhbc-header h1{font-size:20px}.fhbc-book{max-width:46vw;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.fhbc-header-actions .fhbc-button{padding:0 9px}.fhbc-scroll{padding:12px 12px 24px}.fhbc-grid.cols-2,.fhbc-grid.cols-3{grid-template-columns:1fr}.fhbc-field.wide{grid-column:auto}.fhbc-dynamic-row{grid-template-columns:1fr 32px}.fhbc-dynamic-row>.fhbc-name-input{grid-column:1/-1}.fhbc-alias-row{grid-template-columns:1fr 32px}.fhbc-alias-row>input:nth-child(2){grid-column:1/2}.fhbc-footer>div{flex-direction:row}.fhbc-button.primary{min-width:176px}.fhbc-preview{padding:18px 12px}.fhbc-preview-col{max-width:76%}}
 @media(max-width:480px){.fhbc-footer>.fhbc-dirty,.fhbc-footer>.fhbc-saved{display:none}.fhbc-footer>div{width:100%}.fhbc-footer .fhbc-button{flex:1;padding:0 8px}.fhbc-button.primary{min-width:0}}
+.fhbc-rules-editor{height:auto;min-height:320px;resize:vertical;line-height:1.6;white-space:pre-wrap;font-family:inherit}
+.fhbc-fixed-format{margin:10px 0;padding:12px;border-radius:8px;background:var(--fhbc-soft);white-space:pre-wrap;overflow-wrap:anywhere;font-size:12px}
 </style>
