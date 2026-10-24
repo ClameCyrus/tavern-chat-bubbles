@@ -1,4 +1,5 @@
 import { createApp } from 'vue';
+import { createBubbleDomUpdate } from '@util/bubble-dom';
 import { createScriptIdIframe, teleportStyle } from '@util/script';
 import AppearancePanel from './AppearancePanel.vue';
 import { protectBubbleStyles } from './style-protection';
@@ -10,6 +11,7 @@ import {
 
 // ============================================================
 // 线上聊天气泡_通用版 v15.8
+// 兼容修复：保留柏宝绘占位、Shadow DOM 与未变化的组件节点，避免首次生图加载条丢失
 // v15.8：可切换外观保护；输出规则面板编辑、独立保存与恢复默认；动画禁用时保持可见
 // 变更：世界书读写保留完整书名；跳过失效引用，读取失败不再逐条触发斜杠查询或误补条目
 // v15.6：新增 NPC 通用头像，作为未设置单独头像的 NPC 的兜底；均留空时使用名字文字头像
@@ -2196,7 +2198,8 @@ stream_mode = defer`;
 
         let rendered = false;
         ENTRY_RE.lastIndex = 0;
-        const html = sanitizeForParse(textEl.innerHTML);
+        const domUpdate = createBubbleDomUpdate(textEl);
+        const html = sanitizeForParse(domUpdate.html);
         if (ENTRY_RE.test(html)) {
             ENTRY_RE.lastIndex = 0;
 
@@ -2221,8 +2224,7 @@ stream_mode = defer`;
                 const frag = buildEntry(type.toLowerCase(), rest, idx++, groupNames, noAnim);
                 return frag ? frag : m;
             });
-            if (out !== html) {
-                textEl.innerHTML = out;
+            if (out !== html && domUpdate.apply(out)) {
                 cleanSiblings(textEl);
                 groupThreads(textEl);
                 rendered = true;

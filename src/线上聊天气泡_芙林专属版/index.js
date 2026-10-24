@@ -1,8 +1,7 @@
-import { protectBubbleStyles } from '../线上聊天气泡_通用版/style-protection';
-
 // ============================================================
 // 芙林_聊天气泡_专属版 v14
-// 兼容修复：动画禁用时保持可见；protect_appearance 控制主题与状态栏样式保护
+// 兼容修复：保留柏宝绘占位、Shadow DOM 与未变化的组件节点，避免首次生图加载条丢失
+// 兼容修复：动画禁用时保持可见；主题保护内置开启，仅通过脚本顶部常量调整
 // v14：同步通用版 v15.5 的尺寸配置、移动端修复、媒体装饰锚点、image 开关与折叠卡片（不含可视化面板）
 // v13：确认角色主世界书已导入后才查找和注入，不扫描其它世界书
 // v12：用户名替换在气泡渲染后自动补应用；消息编辑完成后可靠重渲染；用户气泡内文字左对齐
@@ -13,9 +12,185 @@ import { protectBubbleStyles } from '../线上聊天气泡_通用版/style-prote
 // ============================================================
 const FHB_STYLE_ID = 'fhb-style-flynn';
 const FHB_MESSAGE_RENDERED_EVENT = 'fhb_message_rendered';
+const FHB_PROTECT_APPEARANCE = true;
 
 function initFlynnChatBubbles() {
   const CONF_VERSION = 'v15.5';
+
+  // 独立粘贴版内置依赖；分别对应 style-protection.ts 与 util/bubble-dom.ts。
+  // 只增强气泡自己的规则；外部主题和状态栏的样式保持原样。
+  // display 的行内开关用于图片回退，opacity/transform 由动画控制，不能提升为 !important。
+  const INLINE_OR_ANIMATED = new Set(['display', 'opacity', 'transform']);
+  function splitCss(text, separator) {
+    const parts = [];
+    let start = 0;
+    let depth = 0;
+    let quote = '';
+    for (let index = 0; index < text.length; index++) {
+      const char = text[index];
+      if (char === '\\') {
+        index++;
+        continue;
+      }
+      if (quote) {
+        if (char === quote) quote = '';
+        continue;
+      }
+      if (char === '"' || char === "'") {
+        quote = char;
+        continue;
+      }
+      if (char === '(' || char === '[') depth++;
+      else if (char === ')' || char === ']') depth--;
+      else if (char === separator && depth === 0) {
+        parts.push(text.slice(start, index));
+        start = index + 1;
+      }
+    }
+    parts.push(text.slice(start));
+    return parts;
+  }
+  function scopeSelector(selector) {
+    selector = selector.trim();
+    const pseudo = selector.match(/::[\w-]+$/)?.[0] ?? '';
+    const target = pseudo ? selector.slice(0, -pseudo.length) : selector;
+    return `#chat .mes .mes_text :is(${target})${pseudo}`;
+  }
+  function protectBubbleStyles(css) {
+    // 模板中的叶子规则逐条增强，保留媒体条件与 keyframes。
+    // 不经过 CSSOM 重写：含 var() 的复合声明在 CSSOM 中可能展开为空的长属性。
+    return css.replace(/([^{}]+)\{([^{}]*)\}/g, (rule, selector, declarations) => {
+      if (!selector.includes('.fhb-')) return rule;
+      const scoped = splitCss(selector, ',').map(scopeSelector).join(',');
+      const protectedDeclarations = splitCss(declarations, ';')
+        .map(declaration => {
+          const colon = declaration.indexOf(':');
+          if (colon < 0) return declaration;
+          const property = declaration.slice(0, colon).trim();
+          if (INLINE_OR_ANIMATED.has(property) || /!important\s*$/i.test(declaration)) return declaration;
+          return `${declaration.trim()} !important`;
+        })
+        .join(';');
+      return `${scoped}{${protectedDeclarations}}`;
+    });
+  }
+
+  /** 解析时隔离运行中的组件，提交时复用原节点及未变化的 DOM。 */
+  function createBubbleDomUpdate(root) {
+    const document = root.ownerDocument;
+    const prefix = `fhb-live-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}-`;
+    const retained = new Map();
+    function cloneForParse(node) {
+      if (node.nodeType === 1) {
+        const element = node;
+        if (element.matches('[data-bbi-slot], iframe, video, audio, canvas, object, embed') || element.shadowRoot) {
+          const key = `${prefix}${retained.size}`;
+          retained.set(key, element);
+          return document.createComment(key);
+        }
+      }
+      const clone = node.cloneNode(false);
+      for (const child of node.childNodes) clone.appendChild(cloneForParse(child));
+      return clone;
+    }
+    const snapshot = root.cloneNode(false);
+    for (const child of root.childNodes) snapshot.appendChild(cloneForParse(child));
+    function apply(html) {
+      const template = document.createElement('template');
+      template.innerHTML = html;
+      const markers = new Map();
+      const found = new Set();
+      const walker = document.createTreeWalker(template.content, 128 /* SHOW_COMMENT */);
+      for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+        const key = node.nodeValue ?? '';
+        const original = retained.get(key);
+        if (!original) continue;
+        if (found.has(key) || !root.contains(original)) return false;
+        found.add(key);
+        markers.set(node, original);
+      }
+      // 条目解析若吞掉组件占位，保留现场，不能提交一个缺失组件的结果。
+      if (found.size !== retained.size) {
+        console.warn('[聊天气泡] 组件占位不完整，已跳过本次转换');
+        return false;
+      }
+      function componentsIn(node) {
+        return [...markers].filter(([marker]) => node.contains(marker)).map(([, original]) => original);
+      }
+      function planChildren(parent, incoming) {
+        const oldChildren = Array.from(parent.childNodes);
+        const used = new Set();
+        return Array.from(incoming.childNodes, child => {
+          const component = markers.get(child);
+          if (component) {
+            used.add(component);
+            return { node: component, incoming: child };
+          }
+          const components = componentsIn(child);
+          const original = oldChildren.find(old => {
+            if (used.has(old) || old.nodeType !== child.nodeType) return false;
+            if (!components.length) return old.isEqualNode(child);
+            return (
+              old.nodeName === child.nodeName &&
+              old.namespaceURI === child.namespaceURI &&
+              components.every(component => old.contains(component))
+            );
+          });
+          if (original) used.add(original);
+          const node = original ?? (components.length ? child.cloneNode(false) : child);
+          return {
+            node,
+            incoming: child,
+            ...(components.length ? { children: planChildren(node, child) } : {}),
+          };
+        });
+      }
+      const patches = planChildren(root, template.content);
+      const obsolete = [];
+      const containsComponent = node => [...retained.values()].some(component => node.contains(component));
+      function patchChildren(parent, children) {
+        const wanted = new Set(children.map(child => child.node));
+        for (const old of Array.from(parent.childNodes)) {
+          if (wanted.has(old)) continue;
+          if (containsComponent(old)) obsolete.push({ parent, node: old });
+          else parent.removeChild(old);
+        }
+        let cursor = parent.firstChild;
+        for (const patch of children) {
+          const { node, incoming } = patch;
+          if (node !== cursor) {
+            // 同一文档内需要移动组件时，支持的浏览器可保留 iframe/custom element 的连接状态。
+            if (node.isConnected && parent.isConnected && typeof parent.moveBefore === 'function') {
+              parent.moveBefore(node, cursor);
+            } else {
+              parent.insertBefore(node, cursor);
+            }
+          }
+          if (patch.children) {
+            const element = node;
+            const next = incoming;
+            for (const attribute of Array.from(element.attributes)) {
+              if (!next.hasAttributeNS(attribute.namespaceURI, attribute.localName))
+                element.removeAttributeNode(attribute);
+            }
+            for (const attribute of Array.from(next.attributes)) {
+              if (element.getAttributeNS(attribute.namespaceURI, attribute.localName) !== attribute.value) {
+                element.setAttributeNS(attribute.namespaceURI, attribute.name, attribute.value);
+              }
+            }
+            patchChildren(element, patch.children);
+          }
+          cursor = node.nextSibling;
+        }
+      }
+      patchChildren(root, patches);
+      for (const { parent, node } of obsolete) {
+        if (node.parentNode === parent) parent.removeChild(node);
+      }
+      return true;
+    }
+    return { html: snapshot.innerHTML, apply };
+  }
 
   const CONFIG = {
     // —— 以下带 * 的项均可被世界书「外观配置」条目覆盖，注释掉即回退到此处默认 ——
@@ -39,7 +214,6 @@ function initFlynnChatBubbles() {
     DECO_SIZE: '', // * 装饰宽度
     DECO_OFFSET: '', // * 装饰外移比例 -100~100
     BUBBLE: {}, // * bubble.<user|char|npc>.<bg|tx|bd|bs|bw>
-    PROTECT_APPEARANCE: true, // * 防止主题和状态栏覆盖气泡外观
     LAYOUT: { // * 气泡整体尺寸与排版
       scale: 1,
       fontSize: 14.5,
@@ -106,7 +280,6 @@ function initFlynnChatBubbles() {
     'DECO_SIZE',
     'DECO_OFFSET',
     'BUBBLE',
-    'PROTECT_APPEARANCE',
     'LAYOUT',
     'STICKER_SIZE',
     'IMAGE_AUTO_GENERATE',
@@ -790,9 +963,6 @@ message_spacing = 14
 # ------------------------------------------------------------
 # 配色跟随：auto 自动判断你的酒馆是深色还是浅色 / dark 强制深色 / light 强制浅色
 theme = auto
-
-# 开启后保护气泡布局、圆角、描边与阴影；关闭后允许酒馆主题改变外观。
-protect_appearance = true
 
 # 表情包图片宽度，留空为自适应。填法：120px
 sticker_size =
@@ -1536,11 +1706,10 @@ stream_mode = defer`;
         return;
       }
 
-      if (kl === 'image_auto_generate' || kl === 'protect_appearance') {
-        const key = kl === 'protect_appearance' ? 'PROTECT_APPEARANCE' : 'IMAGE_AUTO_GENERATE';
+      if (kl === 'image_auto_generate') {
         const t = v.toLowerCase();
-        if (['true', '1', 'yes', 'on', '是', '开启'].includes(t)) CONFIG[key] = true;
-        if (['false', '0', 'no', 'off', '否', '关闭'].includes(t)) CONFIG[key] = false;
+        if (['true', '1', 'yes', 'on', '是', '开启'].includes(t)) CONFIG.IMAGE_AUTO_GENERATE = true;
+        if (['false', '0', 'no', 'off', '否', '关闭'].includes(t)) CONFIG.IMAGE_AUTO_GENERATE = false;
         return;
       }
       if (!v) return;
@@ -2233,7 +2402,8 @@ stream_mode = defer`;
 
     let rendered = false;
     ENTRY_RE.lastIndex = 0;
-    const html = sanitizeForParse(textEl.innerHTML);
+    const domUpdate = createBubbleDomUpdate(textEl);
+    const html = sanitizeForParse(domUpdate.html);
     if (ENTRY_RE.test(html)) {
       ENTRY_RE.lastIndex = 0;
 
@@ -2258,8 +2428,7 @@ stream_mode = defer`;
         const frag = buildEntry(type.toLowerCase(), rest, idx++, groupNames, noAnim);
         return frag ? frag : m;
       });
-      if (out !== html) {
-        textEl.innerHTML = out;
+      if (out !== html && domUpdate.apply(out)) {
         cleanSiblings(textEl);
         groupThreads(textEl);
         rendered = true;
@@ -2762,7 +2931,7 @@ stream_mode = defer`;
     const style = PD.createElement('style');
     style.id = FHB_STYLE_ID;
     const css = buildCSS(p);
-    style.textContent = CONFIG.PROTECT_APPEARANCE ? protectBubbleStyles(css) : css;
+    style.textContent = FHB_PROTECT_APPEARANCE ? protectBubbleStyles(css) : css;
     PD.head.appendChild(style);
   }
 
